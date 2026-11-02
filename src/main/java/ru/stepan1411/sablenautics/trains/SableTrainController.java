@@ -115,6 +115,7 @@ public final class SableTrainController {
     private static final String FLY_OFF_ANCHOR_X_KEY = "sablenautics_fly_off_anchor_x";
     private static final String FLY_OFF_ANCHOR_Y_KEY = "sablenautics_fly_off_anchor_y";
     private static final String FLY_OFF_ANCHOR_Z_KEY = "sablenautics_fly_off_anchor_z";
+    private static final String ATTACH_STARTED_TICK_KEY = "sablenautics_attach_started_tick";
     private static final String BOGIES_KEY = "sablenautics_bogies";
     private static final String RUN_OVER_KEY = "sablenautics_last_run_over";
     private static final int RUN_OVER_COOLDOWN = 10;
@@ -139,6 +140,8 @@ public final class SableTrainController {
     private static final int MAX_ATTACH_PROBES = 6;
     /** How many distinct track points are tried before waiting for the next attempt. */
     private static final int MAX_ATTACH_ATTEMPTS = 8;
+    /** How many ticks to wait before actually snapping onto the track. */
+    private static final int ATTACH_DELAY_TICKS = 60;
     /** Track blocks this close to the edge the train flew off are not grabbed again. */
     private static final double FLY_OFF_GRAB_RADIUS = 2.5;
 
@@ -191,6 +194,10 @@ public final class SableTrainController {
         private @Nullable Vec3 flyOffAnchor;
         /** Track edges the train was on when it flew off. It must not latch back onto them. */
         private @Nullable Set<EdgeKey> flyOffEdges;
+        /** Tick at which the auto-attach countdown started; -1 if not counting down. */
+        private long attachStartedTick = -1L;
+        /** The track point the train will snap to after the countdown finishes. */
+        private @Nullable TrackPoint attachCandidate;
         /**
          * Only this carriage may start auto-attaching a fully detached train. After the train
          * flies off the end of a track, the carriages left behind are still over the old rails
@@ -629,6 +636,10 @@ public final class SableTrainController {
      * Snaps a fully detached train onto the nearest track edge, straight or curved, regardless
      * of how fast the body is moving. The track is looked up from the track graph, so curves
      * are found even in the middle of a bezier where there is no track block.
+     * <p>
+     * Attachment is not instant: once a suitable track is found the train waits
+     * {@link #ATTACH_DELAY_TICKS} ticks before snapping, so a train landing on a ramp does not
+     * teleport onto rails the very tick it touches them.
      */
     private static boolean tryAttachToNearbyTrack(ServerSubLevel body, ServerLevel level, Train train,
                                                   SubLevelData data) {
@@ -637,6 +648,27 @@ public final class SableTrainController {
         if (!allCarriagesDetached(train)) return false;
 
         long now = level.getGameTime();
+
+        // A countdown is already running: wait until it finishes before snapping.
+        if (data.attachStartedTick != -1L) {
+            if (now - data.attachStartedTick < ATTACH_DELAY_TICKS) return false;
+            TrackPoint candidate = data.attachCandidate;
+            data.attachStartedTick = -1L;
+            data.attachCandidate = null;
+            writeDetachedFlag(data);
+            if (candidate == null) return false;
+            Vec3 direction = trackDirection(body, data);
+            if (relocateToTrackPoint(train, level, candidate, direction)) {
+                Vector3dc pos = body.logicalPose().position();
+                level.playSound(null, new BlockPos((int) pos.x(), (int) pos.y(), (int) pos.z()),
+                        SoundEvents.MINECART_RIDING, SoundSource.NEUTRAL, 0.7f, 1.0f);
+                LOGGER.info("Sablenautics: train {} attached to track at {}", train.id, candidate.worldPos());
+                return true;
+            }
+            return false;
+        }
+
+        // Not counting down yet: find a suitable track point and start the countdown.
         if (now < data.nextAttachAttemptTick) return false;
 
         List<BogieProbe> bogieProbes = new ArrayList<>();
@@ -673,27 +705,43 @@ public final class SableTrainController {
             return false;
         }
 
-        Vec3 direction = trackDirection(body, data);
-        List<TrackPoint> tried = new ArrayList<>();
+        // Deduplicate and pick the nearest candidate to the trigger carriage.
+        candidates.sort(Comparator.comparingDouble(c -> c.worldPos().distanceToSqr(
+                new Vec3(body.logicalPose().position().x, body.logicalPose().position().y, body.logicalPose().position().z))));
+        List<TrackPoint> unique = new ArrayList<>();
         for (TrackPoint candidate : candidates) {
-            if (tried.size() >= MAX_ATTACH_ATTEMPTS) break;
             boolean duplicate = false;
-            for (TrackPoint previous : tried) {
+            for (TrackPoint previous : unique) {
                 if (sameTrackPoint(previous, candidate)) {
                     duplicate = true;
                     break;
                 }
             }
-            if (duplicate) continue;
-
-            tried.add(candidate);
-            if (relocateToTrackPoint(train, level, candidate, direction)) {
-                LOGGER.info("Sablenautics: train {} attached to track at {}", train.id, candidate.worldPos());
-                return true;
-            }
+            if (!duplicate) unique.add(candidate);
         }
 
-        data.nextAttachAttemptTick = now + AUTO_ATTACH_RETRY_TICKS;
+        if (unique.isEmpty()) {
+            // If we were counting down but lost the track candidate, abort the countdown.
+            if (data.attachStartedTick != -1L) {
+                data.attachStartedTick = -1L;
+                data.attachCandidate = null;
+                writeDetachedFlag(data);
+            }
+            data.nextAttachAttemptTick = now + AUTO_ATTACH_SCAN_INTERVAL;
+            return false;
+        }
+
+        TrackPoint chosen = unique.get(0);
+        data.attachStartedTick = now;
+        data.attachCandidate = chosen;
+        writeDetachedFlag(data);
+
+        // Play a warning sound so the player knows the train is about to snap onto rails.
+        Vector3dc pos = body.logicalPose().position();
+        level.playSound(null, new BlockPos((int) pos.x(), (int) pos.y(), (int) pos.z()),
+                SoundEvents.ARMOR_STAND_PLACE, SoundSource.NEUTRAL, 0.6f, 1.2f);
+        LOGGER.info("Sablenautics: train {} will attach to track at {} in {} ticks",
+                train.id, chosen.worldPos(), ATTACH_DELAY_TICKS);
         return false;
     }
 
@@ -751,24 +799,31 @@ public final class SableTrainController {
      * Best guess of the direction the carriage is lying in, used to pick the track axis.
      */
     private static Vec3 trackDirection(ServerSubLevel body, SubLevelData data) {
+        Pose3d pose = body.logicalPose();
+
+        // Preferred: direction from the trailing bogey to the leading bogey, i.e. the way
+        // the train is facing. bogies[0] is leading, bogies[1] is trailing.
+        List<BogieInfo> bogies = data.bogies();
+        if (bogies.size() >= 2) {
+            Vector3d first = pose.transformPosition(bogies.get(0).localPlotCenter(), new Vector3d());
+            Vector3d second = pose.transformPosition(bogies.get(1).localPlotCenter(), new Vector3d());
+            Vec3 forward = new Vec3(first.x - second.x, 0.0, first.z - second.z);
+            if (forward.lengthSqr() > 1.0e-4) return forward.normalize();
+        }
+
+        // Fallback: use the body's own forward axis from the assembly direction.
+        Direction assemblyDirection = data.assemblyDirection();
+        Vector3d local = new Vector3d(assemblyDirection.getStepX(), 0.0, assemblyDirection.getStepZ());
+        Vector3d rotated = pose.orientation().transform(local, new Vector3d());
+        Vec3 fallback = new Vec3(rotated.x, 0.0, rotated.z);
+        if (fallback.lengthSqr() > 1.0e-4) return fallback.normalize();
+
+        // Last resort: current horizontal velocity (may be near zero when landed).
         Vector3d velocity = body.latestLinearVelocity;
         Vec3 horizontal = new Vec3(velocity.x, 0.0, velocity.z);
         if (horizontal.lengthSqr() > 1.0e-4) return horizontal.normalize();
 
-        List<BogieInfo> bogies = data.bogies();
-        if (bogies.size() >= 2) {
-            Pose3d pose = body.logicalPose();
-            Vector3d first = pose.transformPosition(bogies.get(0).localPlotCenter(), new Vector3d());
-            Vector3d second = pose.transformPosition(bogies.get(1).localPlotCenter(), new Vector3d());
-            Vec3 axis = new Vec3(second.x - first.x, 0.0, second.z - first.z);
-            if (axis.lengthSqr() > 1.0e-4) return axis.normalize();
-        }
-
-        Direction assemblyDirection = data.assemblyDirection();
-        Vector3d local = new Vector3d(assemblyDirection.getStepX(), 0.0, assemblyDirection.getStepZ());
-        Vector3d rotated = body.logicalPose().orientation().transform(local, new Vector3d());
-        Vec3 fallback = new Vec3(rotated.x, 0.0, rotated.z);
-        return fallback.lengthSqr() > 1.0e-4 ? fallback.normalize() : new Vec3(0.0, 0.0, 1.0);
+        return new Vec3(0.0, 0.0, 1.0);
     }
 
     /**
@@ -830,6 +885,8 @@ public final class SableTrainController {
         data.flyOffAnchor = null;
         data.flyOffEdges = null;
         data.autoAttachTrigger = true;
+        data.attachStartedTick = -1L;
+        data.attachCandidate = null;
         markDetached(data, train);
         LOGGER.warn("Sablenautics: carriage {} of train {} tore off the rails (offset {} blocks)",
                 data.carriageIndex(), train.id, String.format("%.2f", error));
@@ -852,6 +909,8 @@ public final class SableTrainController {
         data.flyOffAnchor = null;
         data.flyOffEdges = null;
         data.autoAttachTrigger = true;
+        data.attachStartedTick = -1L;
+        data.attachCandidate = null;
         if (data.derailedByDetach) {
             data.derailedByDetach = false;
             train.derailed = false;
@@ -1201,6 +1260,8 @@ public final class SableTrainController {
             data.flyOffAnchor = null;
             data.flyOffEdges = null;
             data.autoAttachTrigger = true;
+            data.attachStartedTick = -1L;
+            data.attachCandidate = null;
             data.initialized = true;
             data.hasTarget = true;
             resetTargetTracking(data, targetPosition, orientation, level);
@@ -1709,6 +1770,10 @@ public final class SableTrainController {
         data.detached = userData.getBoolean(DETACHED_KEY);
         data.flewOff = userData.getBoolean(FLEW_OFF_KEY);
         data.autoAttachTrigger = !userData.contains(AUTO_ATTACH_KEY) || userData.getBoolean(AUTO_ATTACH_KEY);
+        data.attachStartedTick = userData.getLong(ATTACH_STARTED_TICK_KEY);
+        // Do not restore the attach candidate (complex object); start fresh after a reload.
+        data.attachCandidate = null;
+        if (data.attachStartedTick == 0L) data.attachStartedTick = -1L;
         if (userData.contains(FLY_OFF_ANCHOR_X_KEY)) {
             data.flyOffAnchor = new Vec3(userData.getDouble(FLY_OFF_ANCHOR_X_KEY),
                     userData.getDouble(FLY_OFF_ANCHOR_Y_KEY),
@@ -1729,6 +1794,11 @@ public final class SableTrainController {
         bodyData.putBoolean(DETACHED_KEY, data.detached);
         bodyData.putBoolean(FLEW_OFF_KEY, data.flewOff);
         bodyData.putBoolean(AUTO_ATTACH_KEY, data.autoAttachTrigger);
+        if (data.attachStartedTick != -1L) {
+            bodyData.putLong(ATTACH_STARTED_TICK_KEY, data.attachStartedTick);
+        } else {
+            bodyData.remove(ATTACH_STARTED_TICK_KEY);
+        }
 
         Vec3 anchor = data.flyOffAnchor;
         if (anchor != null) {
