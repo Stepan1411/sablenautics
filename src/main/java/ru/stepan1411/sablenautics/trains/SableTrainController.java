@@ -92,6 +92,8 @@ public final class SableTrainController {
 
     /** Body sub-level UUID -> carriage data. */
     private static final Map<UUID, SubLevelData> SUBLEVELS = new HashMap<>();
+    /** Trains whose adjacent carriage bodies already have contacts disabled. */
+    private static final Map<UUID, Boolean> LINKED_TRAINS = new HashMap<>();
 
     /**
      * Mutable state of one carriage. Accessor method names intentionally match the old
@@ -121,6 +123,8 @@ public final class SableTrainController {
 
         /** Body <-> rail-target orientation joint, active while the train is on the rails. */
         private @Nullable GenericConstraintHandle railJoint;
+        /** Free joint to the next carriage, used only to disable body-body contacts. */
+        private @Nullable GenericConstraintHandle nextContactJoint;
 
         private SubLevelData(ServerSubLevel subLevel, UUID trainId, int carriageIndex,
                              float initialYaw, Direction assemblyDirection,
@@ -231,6 +235,7 @@ public final class SableTrainController {
         if (train == null) return;
         if (data.carriageIndex() < 0 || data.carriageIndex() >= train.carriages.size()) return;
 
+        linkNeighbours(train);
         Carriage carriage = train.carriages.get(data.carriageIndex());
 
         // Create used to refresh anchors in CarriageContraptionEntity#tick. There is no entity now,
@@ -571,6 +576,7 @@ public final class SableTrainController {
     public static int teleportToRails(Train train) {
         if (train == null) return 0;
         ensureMappings(train);
+        linkNeighbours(train);
 
         int moved = 0;
         for (int index = 0; index < train.carriages.size(); index++) {
@@ -667,6 +673,51 @@ public final class SableTrainController {
     /**
      * @return true if this carriage is represented by a Sable sub-level
      */
+    /**
+     * Adds contact-less free joints between adjacent Sable carriage bodies. Without this,
+     * long trains can have neighbouring carriage bodies colliding inside the physics engine.
+     */
+    public static void linkNeighbours(Train train) {
+        if (train == null || LINKED_TRAINS.containsKey(train.id)) return;
+
+        int count = train.carriages.size();
+        SubLevelData[] ordered = new SubLevelData[count];
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (data.trainId().equals(train.id)
+                    && data.carriageIndex() >= 0 && data.carriageIndex() < count) {
+                ordered[data.carriageIndex()] = data;
+            }
+        }
+
+        for (int i = 0; i + 1 < count; i++) {
+            SubLevelData first = ordered[i];
+            SubLevelData second = ordered[i + 1];
+            if (first == null || second == null) continue;
+            if (first.nextContactJoint != null && first.nextContactJoint.isValid()) continue;
+
+            ServerSubLevel firstBody = first.subLevel();
+            ServerSubLevel secondBody = second.subLevel();
+            if (firstBody.isRemoved() || secondBody.isRemoved()) continue;
+            if (firstBody.getLevel() != secondBody.getLevel()) continue;
+
+            SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(firstBody.getLevel());
+            if (physicsSystem == null) continue;
+
+            GenericConstraintConfiguration config = new GenericConstraintConfiguration(
+                    plotCenter(firstBody), plotCenter(secondBody),
+                    new Quaterniond(), new Quaterniond(),
+                    EnumSet.noneOf(ConstraintJointAxis.class));
+            GenericConstraintHandle joint = physicsSystem.getPipeline()
+                    .addConstraint(firstBody, secondBody, config);
+            if (joint != null) {
+                joint.setContactsEnabled(false);
+                first.nextContactJoint = joint;
+            }
+        }
+
+        LINKED_TRAINS.put(train.id, Boolean.TRUE);
+    }
+
     public static boolean isSableCarriage(Carriage carriage) {
         if (carriage == null) return false;
         if (SableCarriageRegistry.get(carriage) != null) return true;
@@ -717,6 +768,9 @@ public final class SableTrainController {
         SubLevelData data = SUBLEVELS.remove(subLevel.getUniqueId());
         if (data != null) {
             removeRailJoint(data);
+            removeConstraint(data.nextContactJoint);
+            data.nextContactJoint = null;
+            LINKED_TRAINS.remove(data.trainId());
             SableBogeyEntity.discardForCarriage(data.trainId(), data.carriageIndex());
             SUBLEVELS.remove(data.subLevel().getUniqueId());
         }
@@ -902,8 +956,11 @@ public final class SableTrainController {
     public static void clear() {
         for (SubLevelData data : SUBLEVELS.values()) {
             removeRailJoint(data);
+            removeConstraint(data.nextContactJoint);
+            data.nextContactJoint = null;
         }
         SUBLEVELS.clear();
+        LINKED_TRAINS.clear();
         SableBogeyEntity.clearTracked();
     }
 }

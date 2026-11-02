@@ -327,6 +327,7 @@ public class SableTrainAssembler {
             PENDING_SUBLEVELS.clear();
         }
 
+        SableTrainController.linkNeighbours(train);
         SABLE_CONTRAPTIONS.clear();
         currentAssemblySable = false;
     }
