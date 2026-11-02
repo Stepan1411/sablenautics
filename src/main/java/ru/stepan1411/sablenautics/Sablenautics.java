@@ -9,10 +9,12 @@ import ru.stepan1411.sablenautics.client.ClientSableTrainControls;
 import ru.stepan1411.sablenautics.content.entities.SablenauticsEntities;
 import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
 import ru.stepan1411.sablenautics.index.SablenauticsBlockEntityTypes;
+import ru.stepan1411.sablenautics.index.SablenauticsBogeyStyles;
 import ru.stepan1411.sablenautics.network.SablenauticsNetwork;
 import ru.stepan1411.sablenautics.trains.SableTrainCommands;
 import ru.stepan1411.sablenautics.trains.SableTrainControlManager;
 import ru.stepan1411.sablenautics.trains.SableTrainControlsEvents;
+import ru.stepan1411.sablenautics.trains.SableTrainScheduleEvents;
 
 @Mod(Sablenautics.MOD_ID)
 public class Sablenautics {
@@ -26,6 +28,7 @@ public class Sablenautics {
 
     public Sablenautics(final IEventBus modEventBus) {
         REGISTRATE.registerEventListeners(modEventBus);
+        SablenauticsBogeyStyles.init();
         SablenauticsBlocks.init();
         SablenauticsBlockEntityTypes.init();
         SablenauticsEntities.ENTITY_TYPES.register(modEventBus);
@@ -36,6 +39,8 @@ public class Sablenautics {
         NeoForge.EVENT_BUS.addListener(SableTrainControlsEvents::onRightClickBlock);
         NeoForge.EVENT_BUS.addListener(SableTrainControlsEvents::onServerStopped);
         NeoForge.EVENT_BUS.addListener(SableTrainControlsEvents::onEntityJoinLevel);
+        NeoForge.EVENT_BUS.addListener(SableTrainScheduleEvents::onEntityInteract);
+        NeoForge.EVENT_BUS.addListener(SableTrainScheduleEvents::onRightClickBlock);
         NeoForge.EVENT_BUS.addListener(SableTrainControlManager::serverTick);
         NeoForge.EVENT_BUS.addListener(SableTrainCommands::register);
 

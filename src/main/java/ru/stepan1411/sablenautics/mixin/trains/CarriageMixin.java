@@ -13,6 +13,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import ru.stepan1411.sablenautics.trains.SableCarriageRegistry;
 import ru.stepan1411.sablenautics.trains.SableTrainAssembler;
+import ru.stepan1411.sablenautics.trains.SableTrainController;
 
 /**
  * For carriages marked with a physics sticker, never create a
@@ -42,6 +43,18 @@ public abstract class CarriageMixin {
         Carriage carriage = (Carriage) (Object) this;
         if (carriage.storage != null) {
             carriage.storage.initialize();
+        }
+    }
+
+    /**
+     * Without a {@code CarriageContraptionEntity}, Create leaves the conductor flags false,
+     * which prevents automatic schedules from driving the train. Derive them from the
+     * sub-level instead.
+     */
+    @Inject(method = "updateConductors", at = @At("HEAD"), cancellable = true)
+    private void sablenautics$updateConductors(CallbackInfo ci) {
+        if (SableTrainController.updateConductors((Carriage) (Object) this)) {
+            ci.cancel();
         }
     }
 }

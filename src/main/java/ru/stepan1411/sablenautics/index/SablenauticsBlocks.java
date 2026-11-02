@@ -11,6 +11,7 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.world.item.Items;
 import ru.stepan1411.sablenautics.Sablenautics;
 import ru.stepan1411.sablenautics.content.blocks.PhysicsStickerBlock;
+import ru.stepan1411.sablenautics.content.blocks.SableBogeyBlock;
 
 public class SablenauticsBlocks {
     private static final com.simibubi.create.foundation.data.CreateRegistrate REGISTRATE = Sablenautics.getRegistrate();
@@ -32,6 +33,23 @@ public class SablenauticsBlocks {
                     .save(prov))
             .simpleItem()
             .register();
+
+    /**
+     * Sable bogey block, copied from the Railways invisible bogey. It is used as the
+     * placeholder bogey inside a Sable carriage and can also be placed in the world.
+     */
+    public static final BlockEntry<SableBogeyBlock> SABLE_BOGEY = REGISTRATE
+            .block("sable_bogey", SableBogeyBlock::new)
+            .initialProperties(SharedProperties::softMetal)
+            .properties(p -> p.mapColor(net.minecraft.world.level.material.MapColor.PODZOL)
+                    .sound(net.minecraft.world.level.block.SoundType.NETHERITE_BLOCK)
+                    .noOcclusion())
+            .tag(AllBlockTags.SAFE_NBT.tag)
+            .transform(TagGen.pickaxeOnly())
+            .loot((p, l) -> p.dropOther(l, AllBlocks.RAILWAY_CASING.get()))
+            .lang("Sable Bogey")
+            .register();
+
 
     public static void init() {
     }

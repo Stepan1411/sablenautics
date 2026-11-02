@@ -1,6 +1,7 @@
 {
   "replace": false,
   "values": [
-    "sablenautics:sable_bogey"
+    "sablenautics:sable_bogey",
+    "create:seat"
   ]
 }

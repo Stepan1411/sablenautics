@@ -47,14 +47,27 @@ public class SableBogeyEntity extends Entity {
             SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.FLOAT);
     private static final EntityDataAccessor<Float> QW =
             SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.FLOAT);
+    private static final EntityDataAccessor<Boolean> BODY_VALID =
+            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<Float> BODY_X =
+            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.FLOAT);
+    private static final EntityDataAccessor<Float> BODY_Y =
+            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.FLOAT);
+    private static final EntityDataAccessor<Float> BODY_Z =
+            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.FLOAT);
 
     private static final Set<SableBogeyEntity> TRACKED = ConcurrentHashMap.newKeySet();
+    private static final int ATTRACT_TICKS = 8;
 
     private @Nullable UUID trainId;
     private int carriageIndex = -1;
     private int bogieIndex = -1;
     private double wheelRadius = 0.5;
     private int orphanTicks;
+
+    private @Nullable Vec3 attractFrom;
+    private @Nullable Quaterniond attractFromOrientation;
+    private int attractTick = -1;
 
     private float previousWheelAngle;
     private float wheelAngle;
@@ -83,6 +96,10 @@ public class SableBogeyEntity extends Entity {
         builder.define(QY, 0.0f);
         builder.define(QZ, 0.0f);
         builder.define(QW, 1.0f);
+        builder.define(BODY_VALID, false);
+        builder.define(BODY_X, 0.0f);
+        builder.define(BODY_Y, 0.0f);
+        builder.define(BODY_Z, 0.0f);
     }
 
     public void configure(UUID trainId, int carriageIndex, int bogieIndex, BogieInfo info) {
@@ -141,6 +158,7 @@ public class SableBogeyEntity extends Entity {
         TRACKED.add(this);
 
         if (trainId == null || carriageIndex < 0 || bogieIndex < 0) {
+            entityData.set(BODY_VALID, false);
             if (++orphanTicks > 200) discard();
             return;
         }
@@ -148,17 +166,57 @@ public class SableBogeyEntity extends Entity {
         SableTrainController.BogieTarget target =
                 SableTrainController.bogieTarget(trainId, carriageIndex, bogieIndex);
         if (target == null) {
+            entityData.set(BODY_VALID, false);
             // Give the body sub-level time to load after a world restart.
             if (++orphanTicks > 200) discard();
             return;
         }
         orphanTicks = 0;
 
-        Vec3 position = target.position();
-        setPos(position.x, position.y, position.z);
-        setDeltaMovement(Vec3.ZERO);
-
+        Vec3 desired = target.position();
         Quaterniond orientation = target.orientation();
+
+        if (target.onRails()) {
+            attractTick = -1;
+            attractFrom = null;
+            attractFromOrientation = null;
+            setPos(desired.x, desired.y, desired.z);
+            setDeltaMovement(Vec3.ZERO);
+            applySyncedOrientation(orientation);
+        } else {
+            // When the wheels tear off the rails, pull them toward the carriage body over
+            // a short time instead of snapping instantly.
+            if (attractTick < 0) {
+                attractFrom = new Vec3(getX(), getY(), getZ());
+                Quaternionf current = getSyncedOrientation();
+                attractFromOrientation = new Quaterniond(current.x, current.y, current.z, current.w);
+                attractTick = 0;
+            }
+            attractTick++;
+
+            float t = Math.min(1.0f, attractTick / (float) ATTRACT_TICKS);
+            // Ease-in: starts slowly and accelerates towards the end.
+            float eased = t * t;
+
+            Vec3 position = attractFrom.lerp(desired, eased);
+            setPos(position.x, position.y, position.z);
+            setDeltaMovement(Vec3.ZERO);
+
+            Quaterniond attracted = new Quaterniond(attractFromOrientation).slerp(orientation, eased);
+            applySyncedOrientation(attracted);
+        }
+
+        Vec3 bodyAttachment = target.bodyAttachment();
+        entityData.set(BODY_X, (float) bodyAttachment.x);
+        entityData.set(BODY_Y, (float) bodyAttachment.y);
+        entityData.set(BODY_Z, (float) bodyAttachment.z);
+        entityData.set(BODY_VALID, true);
+
+        float angle = entityData.get(WHEEL_ANGLE) - target.wheelAngleDelta();
+        entityData.set(WHEEL_ANGLE, angle % 360.0f);
+    }
+
+    private void applySyncedOrientation(Quaterniond orientation) {
         entityData.set(QX, (float) orientation.x);
         entityData.set(QY, (float) orientation.y);
         entityData.set(QZ, (float) orientation.z);
@@ -167,9 +225,6 @@ public class SableBogeyEntity extends Entity {
         Vector3d euler = orientation.getEulerAnglesYXZ(new Vector3d());
         setYRot((float) Math.toDegrees(-euler.y));
         setXRot((float) Math.toDegrees(euler.x));
-
-        float angle = entityData.get(WHEEL_ANGLE) - target.wheelAngleDelta();
-        entityData.set(WHEEL_ANGLE, angle % 360.0f);
     }
 
     @Override
@@ -232,6 +287,17 @@ public class SableBogeyEntity extends Entity {
 
     public Quaternionf getSyncedOrientation() {
         return new Quaternionf(entityData.get(QX), entityData.get(QY), entityData.get(QZ), entityData.get(QW));
+    }
+
+    /**
+     * @return the matching point on the carriage body in world space, or {@code null} if the
+     *         body is currently not available
+     */
+    public @Nullable Vec3 getBodyAttachment() {
+        if (!entityData.get(BODY_VALID)) {
+            return null;
+        }
+        return new Vec3(entityData.get(BODY_X), entityData.get(BODY_Y), entityData.get(BODY_Z));
     }
 
     /**

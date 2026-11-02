@@ -1,6 +1,7 @@
 package ru.stepan1411.sablenautics.trains;
 
 import com.simibubi.create.Create;
+import com.simibubi.create.AllTags.AllBlockTags;
 import com.simibubi.create.content.contraptions.glue.SuperGlueEntity;
 import com.simibubi.create.content.contraptions.StructureTransform;
 import com.simibubi.create.content.contraptions.actors.trainControls.ControlsBlock;
@@ -184,6 +185,12 @@ public final class SableTrainDisassembly {
 
                     level.destroyBlock(newPos, true);
                     level.setBlock(newPos, newState, Block.UPDATE_ALL);
+
+                    // Seats travel inside the plot; put the seat entity (and its rider) back
+                    // onto the restored world block before the plot is purged.
+                    if (AllBlockTags.SEATS.matches(newState)) {
+                        SableTrainSeats.restoreToWorld(level, plotPos, newPos);
+                    }
 
                     BlockEntity oldBe = level.getBlockEntity(plotPos);
                     if (oldBe != null) {

@@ -10,13 +10,11 @@ import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.SubLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -34,9 +32,6 @@ import java.util.*;
 
 public class SableTrainAssembler {
     private static final Logger LOGGER = LoggerFactory.getLogger("Sablenautics");
-
-    private static final ResourceLocation INVISIBLE_BOGEY =
-            ResourceLocation.fromNamespaceAndPath("railways", "invisible_bogey");
 
     // Temporary storage for assembled sublevels before train is created.
     // Keyed by contraption, filled during phase 1 (assemble), consumed during phase 2 (registerTrain).
@@ -150,8 +145,8 @@ public class SableTrainAssembler {
             return;
         }
 
-        // Hide the wheel blocks inside the carriage. Railways' invisible bogey is used when
-        // present; otherwise the block is removed entirely, so the mod still works without it.
+        // Hide the wheel blocks inside the carriage with our own Sable bogey block.
+        // The visible wheel model is drawn by SableBogeyEntity.
         for (BogeyCapture capture : bogeyCaptures) {
             if (hideBogeyBlock(serverLevel, capture.globalPos())) {
                 globalPosSet.add(capture.globalPos());
@@ -170,9 +165,13 @@ public class SableTrainAssembler {
             return;
         }
 
+        // Keep passengers seated: move the world seat entities into the plot together with
+        // their seat blocks, otherwise they see no block below them and eject the rider.
+        BlockPos plotAnchor = subLevel.getPlot().getCenterBlock();
+        SableTrainSeats.moveIntoSubLevel(serverLevel, anchor, plotAnchor, blocks);
+
         // Make sure the controls model is open inside the plot. The same state was written into
         // the world before assembly, but block updates during the move may have reset it.
-        BlockPos plotAnchor = subLevel.getPlot().getCenterBlock();
         for (BlockPos local : blocks.keySet()) {
             BlockPos plotPos = plotAnchor.offset(local.getX() - anchor.getX(),
                     local.getY() - anchor.getY(), local.getZ() - anchor.getZ());
@@ -247,26 +246,19 @@ public class SableTrainAssembler {
         BlockState oldState = level.getBlockState(pos);
         if (!(oldState.getBlock() instanceof AbstractBogeyBlock<?>)) return false;
 
-        Block invisibleBlock = BuiltInRegistries.BLOCK.get(INVISIBLE_BOGEY);
-        if (invisibleBlock instanceof AbstractBogeyBlock<?>) {
-            BlockState invisible = invisibleBlock.defaultBlockState();
-            if (invisible.hasProperty(AbstractBogeyBlock.AXIS)
-                    && oldState.hasProperty(AbstractBogeyBlock.AXIS)) {
-                invisible = invisible.setValue(AbstractBogeyBlock.AXIS,
-                        oldState.getValue(AbstractBogeyBlock.AXIS));
-            }
-            if (invisible.hasProperty(BlockStateProperties.WATERLOGGED)
-                    && oldState.hasProperty(BlockStateProperties.WATERLOGGED)) {
-                invisible = invisible.setValue(BlockStateProperties.WATERLOGGED,
-                        oldState.getValue(BlockStateProperties.WATERLOGGED));
-            }
-            level.setBlock(pos, invisible, Block.UPDATE_ALL);
-            return true;
+        BlockState invisible = SablenauticsBlocks.SABLE_BOGEY.getDefaultState();
+        if (invisible.hasProperty(AbstractBogeyBlock.AXIS)
+                && oldState.hasProperty(AbstractBogeyBlock.AXIS)) {
+            invisible = invisible.setValue(AbstractBogeyBlock.AXIS,
+                    oldState.getValue(AbstractBogeyBlock.AXIS));
         }
-
-        // No Railways: fully remove the block. The wheel model is supplied by the entity.
-        level.setBlock(pos, Blocks.AIR.defaultBlockState(), 2);
-        return false;
+        if (invisible.hasProperty(BlockStateProperties.WATERLOGGED)
+                && oldState.hasProperty(BlockStateProperties.WATERLOGGED)) {
+            invisible = invisible.setValue(BlockStateProperties.WATERLOGGED,
+                    oldState.getValue(BlockStateProperties.WATERLOGGED));
+        }
+        level.setBlock(pos, invisible, Block.UPDATE_ALL);
+        return true;
     }
 
     /**

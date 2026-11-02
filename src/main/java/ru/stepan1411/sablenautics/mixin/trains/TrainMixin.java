@@ -14,6 +14,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import ru.stepan1411.sablenautics.trains.SableTrainDisassembly;
+import ru.stepan1411.sablenautics.trains.SableTrainSeats;
 
 /**
  * Replaces Create's entity-based disassembly checks with Sable sub-level based ones.
@@ -58,6 +59,19 @@ public abstract class TrainMixin {
         Boolean result = SableTrainDisassembly.disassemble((Train) (Object) this, assemblyDirection, pos);
         if (result != null) {
             cir.setReturnValue(result);
+        }
+    }
+
+    /**
+     * Create counts passengers through the (nonexistent) carriage contraption entities.
+     * Count the entities sitting on the sub-level seats instead so schedule conditions such
+     * as "player count" work on Sable trains too.
+     */
+    @Inject(method = "countPlayerPassengers", at = @At("HEAD"), cancellable = true)
+    private void sablenautics$countSeatedPassengers(CallbackInfoReturnable<Integer> cir) {
+        int count = SableTrainSeats.countSeatedPassengers((Train) (Object) this);
+        if (count >= 0) {
+            cir.setReturnValue(count);
         }
     }
 }
