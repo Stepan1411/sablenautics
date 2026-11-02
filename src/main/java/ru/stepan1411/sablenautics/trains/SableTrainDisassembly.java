@@ -29,8 +29,10 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Vector3d;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.stepan1411.sablenautics.content.entities.SableBogeyEntity;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -115,20 +117,16 @@ public final class SableTrainDisassembly {
             StructureTransform transform = new StructureTransform(target, 0,
                     -alignment.yaw() + alignment.initialYaw(), 0);
 
-            ServerSubLevel bogieSubLevel = SableTrainController.bogieFor(subLevel);
             List<BlockPos> placedBogeys = new ArrayList<>(placeBlocks(level, subLevel, transform));
-            if (bogieSubLevel != null) {
-                placedBogeys.addAll(placeBlocks(level, bogieSubLevel, transform));
-            }
 
             List<AABB> superglue = SableTrainController.superglueFor(subLevel);
             purgeSubLevel(level, subLevel);
-            if (bogieSubLevel != null) {
-                purgeSubLevel(level, bogieSubLevel);
-            }
             restoreGlue(level, transform, superglue);
 
-            restoreBogeyData(level, carriage, placedBogeys, assemblyDirection);
+            if (!restoreBogeyBlocks(level, subLevel, transform)) {
+                // Legacy saves do not carry BogieInfo; fall back to Create's carriage data.
+                restoreBogeyData(level, carriage, placedBogeys, assemblyDirection);
+            }
 
             offset += carriage.bogeySpacing;
             if (i < train.carriageSpacing.size()) {
@@ -147,6 +145,7 @@ public final class SableTrainDisassembly {
         }
 
         SableTrainControlManager.stopForTrain(level.getServer(), train.id);
+        SableBogeyEntity.discardForTrain(train.id);
         Create.RAILWAYS.removeTrain(train.id);
         CatnipServices.NETWORK.sendToAllClients(new RemoveTrainPacket(train));
         LOGGER.info("Sablenautics: Disassembled train {} into blocks", train.id);
@@ -259,6 +258,30 @@ public final class SableTrainDisassembly {
 
             level.addFreshEntity(new SuperGlueEntity(level, new AABB(minX, minY, minZ, maxX, maxY, maxZ)));
         }
+    }
+
+    /**
+     * Puts the original bogey blocks back where the invisible bogey blocks were placed.
+     *
+     * @return true if the sub-level carried bogey entity data and the blocks were restored
+     */
+    private static boolean restoreBogeyBlocks(ServerLevel level, ServerSubLevel subLevel,
+                                              StructureTransform transform) {
+        var bogies = SableTrainController.bogiesFor(subLevel);
+        if (bogies.isEmpty()) return false;
+
+        BlockPos plotAnchor = subLevel.getPlot().getCenterBlock();
+        for (var info : bogies) {
+            Vector3d center = info.localPlotCenter();
+            BlockPos plotPos = BlockPos.containing(center.x, center.y, center.z);
+            BlockPos worldPos = transform.apply(plotPos.subtract(plotAnchor));
+
+            level.setBlock(worldPos, transform.apply(info.originalState()), Block.UPDATE_ALL);
+            if (level.getBlockEntity(worldPos) instanceof AbstractBogeyBlockEntity bogey) {
+                bogey.setBogeyData(info.bogeyData().copy());
+            }
+        }
+        return true;
     }
 
     private static void restoreBogeyData(ServerLevel level, Carriage carriage, List<BlockPos> placed,

@@ -19,10 +19,14 @@ import dev.ryanhcode.sable.sublevel.SubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
@@ -32,6 +36,8 @@ import org.joml.Vector3d;
 import org.joml.Vector3dc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.stepan1411.sablenautics.content.entities.SableBogeyEntity;
+import ru.stepan1411.sablenautics.content.entities.SablenauticsEntities;
 
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -43,12 +49,12 @@ import java.util.UUID;
 /**
  * Represents a Create carriage as a Sable sub-level.
  * <p>
- * The carriage body is a free rigid body. A second sub-level contains the bogey blocks
- * (the wheel model) and is moved along the track each tick. While the train is on the
- * rails the body is held above the wheels by a spring force. If the body is pushed more
- * than {@link #DETACH_DISTANCE} blocks away from the wheels it tears off: the spring is
- * removed, the train is marked as derailed and the wheel sub-level starts following the
- * free-flying body.
+ * The carriage body is a free rigid body. The visible wheel model is a separate
+ * {@link ru.stepan1411.sablenautics.content.entities.SableBogeyEntity} (not a Sable
+ * sub-level); the carriage itself keeps an invisible bogey block so Create's train data
+ * and disassembly still work. While on rails the body is held by a longitudinal spring
+ * and an angular rail joint. If it is pushed more than {@link #DETACH_DISTANCE} blocks
+ * away from the rail target it tears off and the train is marked as derailed.
  * <p>
  * There are no {@code CarriageContraptionEntity} objects in the world. Create still owns the
  * track graph, travelling points and all scheduling; this class only maps each carriage's
@@ -63,12 +69,10 @@ public final class SableTrainController {
     private static final String ASSEMBLY_KEY = "sablenautics_assembly_direction";
     private static final String GLUE_KEY = "sablenautics_superglue";
     private static final String ROLE_KEY = "sablenautics_role";
-    private static final String BODY_UUID_KEY = "sablenautics_body_uuid";
-    private static final String BOGIE_UUID_KEY = "sablenautics_bogie_uuid";
     private static final String DETACHED_KEY = "sablenautics_detached";
+    private static final String BOGIES_KEY = "sablenautics_bogies";
 
     private static final String ROLE_BODY = "body";
-    private static final String ROLE_BOGIE = "bogie";
 
     /** Distance between the body and the wheel model at which the train tears off. */
     public static final double DETACH_DISTANCE = 3.0;
@@ -86,8 +90,6 @@ public final class SableTrainController {
 
     /** Body sub-level UUID -> carriage data. */
     private static final Map<UUID, SubLevelData> SUBLEVELS = new HashMap<>();
-    /** Bogie sub-level UUID -> body sub-level UUID. */
-    private static final Map<UUID, UUID> BOGIE_TO_BODY = new HashMap<>();
 
     /**
      * Mutable state of one carriage. Accessor method names intentionally match the old
@@ -95,12 +97,12 @@ public final class SableTrainController {
      */
     public static final class SubLevelData {
         private final ServerSubLevel subLevel;
-        private @Nullable ServerSubLevel bogieSubLevel;
         private final UUID trainId;
         private final int carriageIndex;
         private final float initialYaw;
         private final Direction assemblyDirection;
         private final List<AABB> superglue;
+        private final List<BogieInfo> bogies;
 
         private boolean detached;
         private boolean derailedByDetach;
@@ -117,27 +119,25 @@ public final class SableTrainController {
 
         /** Body <-> rail-target orientation joint, active while the train is on the rails. */
         private @Nullable GenericConstraintHandle railJoint;
-        /** Body <-> wheel hard glue, active after the train tore off. */
-        private @Nullable GenericConstraintHandle bogieJoint;
 
-        private SubLevelData(ServerSubLevel subLevel, @Nullable ServerSubLevel bogieSubLevel,
-                             UUID trainId, int carriageIndex, float initialYaw,
-                             Direction assemblyDirection, List<AABB> superglue) {
+        private SubLevelData(ServerSubLevel subLevel, UUID trainId, int carriageIndex,
+                             float initialYaw, Direction assemblyDirection,
+                             List<AABB> superglue, List<BogieInfo> bogies) {
             this.subLevel = subLevel;
-            this.bogieSubLevel = bogieSubLevel;
             this.trainId = trainId;
             this.carriageIndex = carriageIndex;
             this.initialYaw = initialYaw;
             this.assemblyDirection = assemblyDirection;
             this.superglue = superglue;
+            this.bogies = bogies;
         }
 
         public ServerSubLevel subLevel() {
             return subLevel;
         }
 
-        public @Nullable ServerSubLevel bogieSubLevel() {
-            return bogieSubLevel;
+        public List<BogieInfo> bogies() {
+            return bogies;
         }
 
         public UUID trainId() {
@@ -169,19 +169,16 @@ public final class SableTrainController {
     }
 
     public static void registerSubLevel(Train train, ServerSubLevel subLevel,
-                                        @Nullable ServerSubLevel bogieSubLevel,
                                         CarriageContraption contraption, int carriageIndex,
-                                        List<AABB> superglue) {
+                                        List<AABB> superglue, List<BogieInfo> bogies) {
         if (train == null || subLevel == null) return;
 
         Direction assemblyDirection = contraption != null ? contraption.getAssemblyDirection() : Direction.NORTH;
         float initialYaw = assemblyDirection.getClockWise().toYRot();
-        SubLevelData data = new SubLevelData(subLevel, bogieSubLevel, train.id, carriageIndex, initialYaw,
-                assemblyDirection, superglue == null ? List.of() : List.copyOf(superglue));
+        List<BogieInfo> safeBogies = bogies == null ? List.of() : List.copyOf(bogies);
+        SubLevelData data = new SubLevelData(subLevel, train.id, carriageIndex, initialYaw,
+                assemblyDirection, superglue == null ? List.of() : List.copyOf(superglue), safeBogies);
         SUBLEVELS.put(subLevel.getUniqueId(), data);
-        if (bogieSubLevel != null) {
-            BOGIE_TO_BODY.put(bogieSubLevel.getUniqueId(), subLevel.getUniqueId());
-        }
 
         CompoundTag bodyData = subLevel.getUserDataTag();
         if (bodyData == null) bodyData = new CompoundTag();
@@ -192,30 +189,20 @@ public final class SableTrainController {
         bodyData.put(GLUE_KEY, writeGlue(data.superglue()));
         bodyData.putString(ROLE_KEY, ROLE_BODY);
         bodyData.putBoolean(DETACHED_KEY, false);
-        if (bogieSubLevel != null) {
-            bodyData.putUUID(BOGIE_UUID_KEY, bogieSubLevel.getUniqueId());
-        } else {
-            bodyData.remove(BOGIE_UUID_KEY);
-        }
+        bodyData.put(BOGIES_KEY, writeBogies(safeBogies));
         subLevel.setUserDataTag(bodyData);
 
-        if (bogieSubLevel != null) {
-            CompoundTag bogieData = bogieSubLevel.getUserDataTag();
-            if (bogieData == null) bogieData = new CompoundTag();
-            bogieData.putUUID(TRAIN_KEY, train.id);
-            bogieData.putInt(CARRIAGE_KEY, carriageIndex);
-            bogieData.putFloat(INITIAL_YAW_KEY, initialYaw);
-            bogieData.putString(ASSEMBLY_KEY, assemblyDirection.getName());
-            bogieData.putString(ROLE_KEY, ROLE_BOGIE);
-            bogieData.putBoolean(DETACHED_KEY, false);
-            bogieData.putUUID(BODY_UUID_KEY, subLevel.getUniqueId());
-            bogieSubLevel.setUserDataTag(bogieData);
+        if (subLevel.getLevel() instanceof ServerLevel level) {
+            for (int i = 0; i < safeBogies.size(); i++) {
+                SableBogeyEntity entity = new SableBogeyEntity(SablenauticsEntities.SABLE_BOGEY.get(), level);
+                entity.configure(train.id, carriageIndex, i, safeBogies.get(i));
+                level.addFreshEntity(entity);
+            }
         }
 
-        LOGGER.info("Sablenautics: Registered sublevel {} for train {} carriage {} (bogie {}, yaw {}, direction {}, glue {})",
+        LOGGER.info("Sablenautics: Registered sublevel {} for train {} carriage {} (bogey entities {}, yaw {}, direction {}, glue {})",
                 subLevel.getUniqueId(), train.id, carriageIndex,
-                bogieSubLevel != null ? bogieSubLevel.getUniqueId() : "none",
-                initialYaw, assemblyDirection, data.superglue().size());
+                safeBogies.size(), initialYaw, assemblyDirection, data.superglue().size());
     }
 
     /**
@@ -234,10 +221,6 @@ public final class SableTrainController {
 
         SubLevelData data = SUBLEVELS.get(subLevel.getUniqueId());
         if (data == null) {
-            // Bogie sub-levels have no data entry of their own; they are moved from the body tick.
-            UUID bodyId = BOGIE_TO_BODY.get(subLevel.getUniqueId());
-            if (bodyId != null && SUBLEVELS.containsKey(bodyId)) return;
-
             data = restore(serverSubLevel);
         }
         if (data == null || data.subLevel() != serverSubLevel) return;
@@ -265,36 +248,12 @@ public final class SableTrainController {
         SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(serverLevel);
         PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
 
-        // Legacy saves have only the body sub-level. Keep the old teleport behaviour for them.
-        if (data.bogieSubLevel() == null || data.bogieSubLevel().isRemoved()) {
-            removeRailJoint(data);
-            removeBogieJoint(data);
-            if (pipeline != null) {
-                teleport(serverSubLevel, targetPosition, targetOrientation, pipeline);
-            }
-            return;
-        }
-
-        ServerSubLevel bogie = data.bogieSubLevel();
-        if (bogie.getLevel() != serverLevel) {
-            // The carriage changed dimension; fall back until a bogie exists in this level.
-            removeRailJoint(data);
-            removeBogieJoint(data);
-            if (pipeline != null) {
-                teleport(serverSubLevel, targetPosition, targetOrientation, pipeline);
-            }
-            return;
-        }
-
         // Align the freshly assembled / freshly loaded carriage once.
         if (!data.initialized) {
             if (!data.detached) {
                 if (pipeline == null) return;
                 teleport(serverSubLevel, targetPosition, targetOrientation, pipeline);
-                teleport(bogie, computeTargetPosition(bogie, anchor, targetOrientation), targetOrientation, pipeline);
                 ensureRailJoint(data, serverSubLevel, pipeline, targetPosition, targetOrientation);
-            } else {
-                ensureBogieJoint(data, serverSubLevel, bogie, pipeline);
             }
             data.initialized = true;
             data.hasTarget = true;
@@ -305,40 +264,14 @@ public final class SableTrainController {
 
         if (!data.detached) {
             if (bodyError > DETACH_DISTANCE) {
-                // The suspension gave out. Weld the wheels to the body at their current
-                // relative pose before letting go of the rails.
                 removeRailJoint(data);
-                if (pipeline != null) {
-                    Vector3d attached = computeAttachedPosition(serverSubLevel, bogie, pose);
-                    teleport(bogie, attached, new Quaterniond(pose.orientation()), pipeline);
-                    Vector3d bodyVelocity = pipeline.getLinearVelocity(serverSubLevel, new Vector3d());
-                    Vector3d bodyAngularVelocity = pipeline.getAngularVelocity(serverSubLevel, new Vector3d());
-                    pipeline.addLinearAndAngularVelocity(bogie, bodyVelocity, bodyAngularVelocity);
-                }
-                ensureBogieJoint(data, serverSubLevel, bogie, pipeline);
                 detach(data, train, bodyError);
             } else {
-                // Wheels stay exactly on the rails. Only the body is driven, so the wheel
-                // sub-level is never pulled off the track by constraint reaction forces.
-                if (pipeline != null) {
-                    Vector3d bogiePosition = computeTargetPosition(bogie, anchor, targetOrientation);
-                    teleport(bogie, bogiePosition, targetOrientation, pipeline);
-                    pipeline.addLinearAndAngularVelocity(bogie, data.targetVelocity, data.targetAngularVelocity);
-                }
                 ensureRailJoint(data, serverSubLevel, pipeline, targetPosition, targetOrientation);
             }
         } else {
-            // The wheel model is now part of the loose train and is no longer teleported.
-            ensureBogieJoint(data, serverSubLevel, bogie, pipeline);
-
             double angle = orientationAngle(pose.orientation(), targetOrientation);
             if (bodyError <= REATTACH_DISTANCE && angle <= REATTACH_ANGLE) {
-                removeBogieJoint(data);
-                if (pipeline != null) {
-                    Vector3d bogiePosition = computeTargetPosition(bogie, anchor, targetOrientation);
-                    teleport(bogie, bogiePosition, targetOrientation, pipeline);
-                    pipeline.addLinearAndAngularVelocity(bogie, data.targetVelocity, data.targetAngularVelocity);
-                }
                 ensureRailJoint(data, serverSubLevel, pipeline, targetPosition, targetOrientation);
                 reattach(data, train);
             }
@@ -355,18 +288,8 @@ public final class SableTrainController {
      */
     public static void prePhysicsTick(ServerSubLevel subLevel, RigidBodyHandle handle, double timeStep) {
         SubLevelData data = SUBLEVELS.get(subLevel.getUniqueId());
-        if (data == null) {
-            UUID bodyId = BOGIE_TO_BODY.get(subLevel.getUniqueId());
-            if (bodyId == null) return;
-            data = SUBLEVELS.get(bodyId);
-            if (data == null || data.detached || data.bogieSubLevel() != subLevel) return;
-            applyAntiGravity(subLevel, handle, timeStep);
-            return;
-        }
-
-        if (data.subLevel() != subLevel) return;
+        if (data == null || data.subLevel() != subLevel) return;
         if (data.detached || !data.hasTarget) return;
-        if (data.bogieSubLevel() == null || data.bogieSubLevel().isRemoved()) return;
 
         applySuspension(subLevel, handle, data, timeStep);
     }
@@ -392,21 +315,6 @@ public final class SableTrainController {
 
         double dt = Math.max(timeStep, 1.0 / 20.0 / 8.0);
         Vector3d impulseWorld = new Vector3d(acceleration).mul(mass * dt);
-        Vector3d impulseLocal = inverseOrientation.transform(impulseWorld, new Vector3d());
-        handle.applyLinearAndAngularImpulse(impulseLocal, new Vector3d(), true);
-    }
-
-    private static void applyAntiGravity(ServerSubLevel subLevel, RigidBodyHandle handle, double timeStep) {
-        double mass = subLevel.getMassTracker().getMass();
-        if (mass <= 0) return;
-
-        Pose3d pose = subLevel.logicalPose();
-        Vector3d gravity = DimensionPhysicsData.getGravity(subLevel.getLevel(), pose.position(), new Vector3d());
-        if (gravity.lengthSquared() < 1.0e-9) return;
-
-        Quaterniond inverseOrientation = new Quaterniond(pose.orientation()).conjugate();
-        Vector3d impulseWorld = new Vector3d(gravity).negate()
-                .mul(mass * Math.max(timeStep, 1.0 / 20.0 / 8.0));
         Vector3d impulseLocal = inverseOrientation.transform(impulseWorld, new Vector3d());
         handle.applyLinearAndAngularImpulse(impulseLocal, new Vector3d(), true);
     }
@@ -504,18 +412,6 @@ public final class SableTrainController {
     /**
      * @return where a bogie sub-level has to be so that it stays rigidly attached to the body.
      */
-    private static Vector3d computeAttachedPosition(ServerSubLevel body, ServerSubLevel bogie, Pose3d bodyPose) {
-        Vector3dc bodyCom = body.getMassTracker().getCenterOfMass();
-        Vector3dc bogieCom = bogie.getMassTracker().getCenterOfMass();
-        if (bodyCom == null || bogieCom == null) {
-            return new Vector3d(bodyPose.position());
-        }
-
-        Quaterniond orientation = new Quaterniond(bodyPose.orientation());
-        Vector3d offset = localAnchorOffset(body, bodyCom).sub(localAnchorOffset(bogie, bogieCom));
-        return new Vector3d(bodyPose.position()).add(orientation.transform(offset, new Vector3d()));
-    }
-
     private static Vector3d localAnchorOffset(ServerSubLevel subLevel, Vector3dc centerOfMass) {
         BlockPos plotAnchor = subLevel.getPlot().getCenterBlock();
         return new Vector3d(plotAnchor.getX() + 0.5, plotAnchor.getY(), plotAnchor.getZ() + 0.5)
@@ -560,35 +456,6 @@ public final class SableTrainController {
         data.railJoint = null;
     }
 
-    /**
-     * Hard glue between the wheel sub-level and the body, used after the train tore off.
-     */
-    private static void ensureBogieJoint(SubLevelData data, ServerSubLevel body, ServerSubLevel bogie,
-                                         @Nullable PhysicsPipeline pipeline) {
-        if (pipeline == null) return;
-        if (data.bogieJoint != null && data.bogieJoint.isValid()) return;
-
-        GenericConstraintConfiguration config = new GenericConstraintConfiguration(
-                plotCenter(bogie),
-                plotCenter(body),
-                new Quaterniond(),
-                new Quaterniond(),
-                EnumSet.allOf(ConstraintJointAxis.class));
-        GenericConstraintHandle joint = pipeline.addConstraint(bogie, body, config);
-        if (joint == null) return;
-
-        // Body and wheels must not fight each other with contacts while welded together.
-        joint.setContactsEnabled(false);
-        data.bogieJoint = joint;
-        pipeline.wakeUp(bogie);
-        pipeline.wakeUp(body);
-    }
-
-    private static void removeBogieJoint(SubLevelData data) {
-        removeConstraint(data.bogieJoint);
-        data.bogieJoint = null;
-    }
-
     private static void removeConstraint(@Nullable GenericConstraintHandle joint) {
         if (joint == null) return;
         try {
@@ -612,6 +479,63 @@ public final class SableTrainController {
     private static Vector3d plotCenter(ServerSubLevel subLevel) {
         BlockPos center = subLevel.getPlot().getCenterBlock();
         return new Vector3d(center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5);
+    }
+
+    public record BogieTarget(Vec3 position, Quaterniond orientation, boolean attached,
+                              float wheelAngleDelta) {
+    }
+
+    public static List<BogieInfo> bogiesFor(ServerSubLevel body) {
+        SubLevelData data = SUBLEVELS.get(body.getUniqueId());
+        if (data == null) data = restore(body);
+        return data != null ? data.bogies() : List.of();
+    }
+
+    /**
+     * Resolves where a wheel entity has to be placed for the current tick.
+     */
+    public static @Nullable BogieTarget bogieTarget(UUID trainId, int carriageIndex, int bogieIndex) {
+        SubLevelData data = null;
+        for (SubLevelData candidate : SUBLEVELS.values()) {
+            if (candidate.trainId().equals(trainId) && candidate.carriageIndex() == carriageIndex) {
+                data = candidate;
+                break;
+            }
+        }
+        if (data == null) return null;
+
+        ServerSubLevel body = data.subLevel();
+        if (body.isRemoved()) return null;
+        if (bogieIndex < 0 || bogieIndex >= data.bogies().size()) return null;
+
+        Train train = Create.RAILWAYS.trains.get(trainId);
+        if (train == null || carriageIndex < 0 || carriageIndex >= train.carriages.size()) return null;
+
+        Carriage carriage = train.carriages.get(carriageIndex);
+        carriage.updateContraptionAnchors();
+
+        ServerLevel level = body.getLevel();
+        DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(level.dimension());
+        if (dce == null || dce.positionAnchor == null) return null;
+
+        BogieInfo info = data.bogies().get(bogieIndex);
+        Vector3dc centerOfMass = body.getMassTracker().getCenterOfMass();
+        if (centerOfMass == null) return null;
+
+        if (!data.detached()) {
+            Quaterniond targetOrientation = computeTargetOrientation(dce, body.logicalPose(), data.initialYaw());
+            Vector3d targetPosition = computeTargetPosition(body, dce.positionAnchor, targetOrientation);
+            Vector3d localOffset = new Vector3d(info.localPlotCenter()).sub(centerOfMass);
+            Vector3d world = new Vector3d(targetPosition)
+                    .add(targetOrientation.transform(localOffset, new Vector3d()));
+            float angleDelta = (float) (360.0 * train.speed / (Math.PI * 2.0 * info.wheelRadius()));
+            return new BogieTarget(new Vec3(world.x, world.y, world.z), targetOrientation, true, angleDelta);
+        }
+
+        Pose3d bodyPose = body.logicalPose();
+        Vector3d world = bodyPose.transformPosition(info.localPlotCenter(), new Vector3d());
+        return new BogieTarget(new Vec3(world.x, world.y, world.z),
+                new Quaterniond(bodyPose.orientation()), false, 0.0f);
     }
 
     private static void teleport(ServerSubLevel subLevel, Vector3d position, Quaterniond orientation,
@@ -648,19 +572,7 @@ public final class SableTrainController {
 
         SubLevelData data = SUBLEVELS.get(serverSubLevel.getUniqueId());
         if (data == null) data = restore(serverSubLevel);
-        if (data != null && data.subLevel() == serverSubLevel) return data;
-
-        UUID bodyId = BOGIE_TO_BODY.get(serverSubLevel.getUniqueId());
-        if (bodyId == null) return null;
-        data = SUBLEVELS.get(bodyId);
-        if (data == null) {
-            SubLevelContainer container = SubLevelContainer.getContainer(level);
-            SubLevel body = container != null ? container.getSubLevel(bodyId) : null;
-            if (body instanceof ServerSubLevel bodySubLevel) {
-                data = restore(bodySubLevel);
-            }
-        }
-        return data;
+        return data != null && data.subLevel() == serverSubLevel ? data : null;
     }
 
     public static @Nullable ServerSubLevel subLevelFor(Train train, int carriageIndex) {
@@ -670,12 +582,6 @@ public final class SableTrainController {
             }
         }
         return null;
-    }
-
-    public static @Nullable ServerSubLevel bogieFor(ServerSubLevel body) {
-        SubLevelData data = SUBLEVELS.get(body.getUniqueId());
-        if (data == null) data = restore(body);
-        return data != null ? data.bogieSubLevel() : null;
     }
 
     public static boolean isDetached(ServerSubLevel body) {
@@ -712,26 +618,16 @@ public final class SableTrainController {
     }
 
     public static void forget(ServerSubLevel subLevel) {
-        UUID uuid = subLevel.getUniqueId();
-        UUID bodyId = BOGIE_TO_BODY.remove(uuid);
-        SubLevelData data = SUBLEVELS.remove(uuid);
-        if (data == null && bodyId != null) {
-            data = SUBLEVELS.get(bodyId);
-        }
+        SubLevelData data = SUBLEVELS.remove(subLevel.getUniqueId());
         if (data != null) {
             removeRailJoint(data);
-            removeBogieJoint(data);
-            if (data.bogieSubLevel() != null) {
-                BOGIE_TO_BODY.remove(data.bogieSubLevel().getUniqueId());
-                if (data.bogieSubLevel() == subLevel) {
-                    data.bogieSubLevel = null;
-                }
-            }
+            SableBogeyEntity.discardForCarriage(data.trainId(), data.carriageIndex());
             SUBLEVELS.remove(data.subLevel().getUniqueId());
         }
     }
 
     public static int purgeSubLevels(ServerLevel level, UUID trainId) {
+        SableBogeyEntity.discardForTrain(trainId);
         SubLevelContainer container = SubLevelContainer.getContainer(level);
         if (container == null) return 0;
 
@@ -783,29 +679,10 @@ public final class SableTrainController {
         CompoundTag userData = subLevel.getUserDataTag();
         if (userData == null || !userData.contains(TRAIN_KEY)) return null;
 
-        if (ROLE_BOGIE.equals(userData.getString(ROLE_KEY))) {
-            UUID bodyId = userData.contains(BODY_UUID_KEY) ? userData.getUUID(BODY_UUID_KEY) : null;
-            if (bodyId == null) return null;
-
-            SubLevelData data = SUBLEVELS.get(bodyId);
-            if (data == null) {
-                SubLevelContainer container = SubLevelContainer.getContainer(subLevel.getLevel());
-                SubLevel body = container != null ? container.getSubLevel(bodyId) : null;
-                if (body instanceof ServerSubLevel bodySubLevel) {
-                    data = restoreBody(bodySubLevel);
-                }
-            }
-            if (data == null) return null;
-
-            BOGIE_TO_BODY.put(subLevel.getUniqueId(), bodyId);
-            if (data.bogieSubLevel() == subLevel) {
-                // Already linked; never overwrite live detach/init state from stale user data.
-                return null;
-            }
-
-            data.bogieSubLevel = subLevel;
-            data.detached = userData.getBoolean(DETACHED_KEY);
-            data.initialized = data.detached;
+        // Old builds used a separate Sable sub-level for the wheels. Those are no longer
+        // needed; the sub-level is discarded and the model is provided by an entity.
+        if ("bogie".equals(userData.getString(ROLE_KEY))) {
+            subLevel.markRemoved();
             return null;
         }
 
@@ -827,27 +704,15 @@ public final class SableTrainController {
         Direction assemblyDirection = Direction.byName(userData.getString(ASSEMBLY_KEY));
         if (assemblyDirection == null) assemblyDirection = Direction.NORTH;
 
-        SubLevelData data = new SubLevelData(subLevel, null, trainId, carriageIndex, initialYaw,
-                assemblyDirection, readGlue(userData));
+        SubLevelData data = new SubLevelData(subLevel, trainId, carriageIndex, initialYaw,
+                assemblyDirection, readGlue(userData), readBogies(subLevel, userData));
         data.detached = userData.getBoolean(DETACHED_KEY);
         // A detached carriage keeps the pose it was saved with; an attached one is aligned once.
         data.initialized = data.detached;
 
-        if (userData.contains(BOGIE_UUID_KEY)) {
-            UUID bogieId = userData.getUUID(BOGIE_UUID_KEY);
-            SubLevelContainer container = SubLevelContainer.getContainer(subLevel.getLevel());
-            SubLevel bogie = container != null ? container.getSubLevel(bogieId) : null;
-            if (bogie instanceof ServerSubLevel bogieSubLevel) {
-                data.bogieSubLevel = bogieSubLevel;
-                BOGIE_TO_BODY.put(bogieId, subLevel.getUniqueId());
-            }
-        }
-
         SUBLEVELS.put(subLevel.getUniqueId(), data);
-        LOGGER.info("Sablenautics: Restored sublevel {} for train {} carriage {} (bogie {}, detached {})",
-                subLevel.getUniqueId(), trainId, carriageIndex,
-                data.bogieSubLevel != null ? data.bogieSubLevel.getUniqueId() : "none",
-                data.detached);
+        LOGGER.info("Sablenautics: Restored sublevel {} for train {} carriage {} ({} bogey entity data, detached {})",
+                subLevel.getUniqueId(), trainId, carriageIndex, data.bogies().size(), data.detached);
         return data;
     }
 
@@ -856,14 +721,6 @@ public final class SableTrainController {
         if (bodyData == null) bodyData = new CompoundTag();
         bodyData.putBoolean(DETACHED_KEY, data.detached);
         data.subLevel().setUserDataTag(bodyData);
-
-        ServerSubLevel bogie = data.bogieSubLevel();
-        if (bogie != null) {
-            CompoundTag bogieData = bogie.getUserDataTag();
-            if (bogieData == null) bogieData = new CompoundTag();
-            bogieData.putBoolean(DETACHED_KEY, data.detached);
-            bogie.setUserDataTag(bogieData);
-        }
     }
 
     public static List<AABB> superglueFor(ServerSubLevel subLevel) {
@@ -892,12 +749,65 @@ public final class SableTrainController {
         return boxes;
     }
 
+    private static net.minecraft.nbt.ListTag writeBogies(List<BogieInfo> bogies) {
+        net.minecraft.nbt.ListTag list = new net.minecraft.nbt.ListTag();
+        for (BogieInfo bogie : bogies) {
+            CompoundTag tag = new CompoundTag();
+            tag.putDouble("LX", bogie.localPlotCenter().x);
+            tag.putDouble("LY", bogie.localPlotCenter().y);
+            tag.putDouble("LZ", bogie.localPlotCenter().z);
+            tag.putDouble("IX", bogie.initialWorldPosition().x);
+            tag.putDouble("IY", bogie.initialWorldPosition().y);
+            tag.putDouble("IZ", bogie.initialWorldPosition().z);
+            tag.putString("Style", bogie.styleId().toString());
+            tag.putString("Size", bogie.sizeId().toString());
+            tag.put("Data", bogie.bogeyData().copy());
+            tag.putString("Axis", bogie.axis().getName());
+            tag.putBoolean("UpsideDown", bogie.upsideDown());
+            tag.putDouble("WheelRadius", bogie.wheelRadius());
+            tag.put("State", NbtUtils.writeBlockState(bogie.originalState()));
+            list.add(tag);
+        }
+        return list;
+    }
+
+    private static List<BogieInfo> readBogies(ServerSubLevel subLevel, CompoundTag userData) {
+        List<BogieInfo> bogies = new java.util.ArrayList<>();
+        if (!userData.contains(BOGIES_KEY, Tag.TAG_LIST)) return bogies;
+
+        net.minecraft.nbt.ListTag list = userData.getList(BOGIES_KEY, Tag.TAG_COMPOUND);
+        var blocks = subLevel.getLevel().holderLookup(Registries.BLOCK);
+        for (int i = 0; i < list.size(); i++) {
+            CompoundTag tag = list.getCompound(i);
+
+            ResourceLocation style = ResourceLocation.tryParse(tag.getString("Style"));
+            if (style == null) style = ResourceLocation.fromNamespaceAndPath("create", "standard");
+            ResourceLocation size = ResourceLocation.tryParse(tag.getString("Size"));
+            if (size == null) size = ResourceLocation.fromNamespaceAndPath("create", "small");
+
+            Direction.Axis axis = Direction.Axis.Z;
+            for (Direction.Axis candidate : Direction.Axis.values()) {
+                if (candidate.getName().equals(tag.getString("Axis"))) {
+                    axis = candidate;
+                    break;
+                }
+            }
+
+            BlockState state = NbtUtils.readBlockState(blocks, tag.getCompound("State"));
+            bogies.add(new BogieInfo(
+                    new Vector3d(tag.getDouble("LX"), tag.getDouble("LY"), tag.getDouble("LZ")),
+                    new Vec3(tag.getDouble("IX"), tag.getDouble("IY"), tag.getDouble("IZ")),
+                    style, size, tag.getCompound("Data").copy(), axis,
+                    tag.getBoolean("UpsideDown"), tag.getDouble("WheelRadius"), state));
+        }
+        return bogies;
+    }
+
     public static void clear() {
         for (SubLevelData data : SUBLEVELS.values()) {
             removeRailJoint(data);
-            removeBogieJoint(data);
         }
         SUBLEVELS.clear();
-        BOGIE_TO_BODY.clear();
+        SableBogeyEntity.clearTracked();
     }
 }

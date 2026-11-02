@@ -1,18 +1,30 @@
 package ru.stepan1411.sablenautics.trains;
 
+import com.simibubi.create.AllBogeyStyles;
 import com.simibubi.create.content.contraptions.actors.trainControls.ControlsBlock;
 import com.simibubi.create.content.trains.bogey.AbstractBogeyBlock;
+import com.simibubi.create.content.trains.bogey.AbstractBogeyBlockEntity;
+import com.simibubi.create.content.trains.bogey.BogeyStyle;
 import com.simibubi.create.content.trains.entity.*;
 import dev.ryanhcode.sable.api.SubLevelAssemblyHelper;
 import dev.ryanhcode.sable.companion.math.BoundingBox3i;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.SubLevel;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate.StructureBlockInfo;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
+import org.joml.Vector3d;
 import org.joml.Vector3dc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +35,11 @@ import java.util.*;
 public class SableTrainAssembler {
     private static final Logger LOGGER = LoggerFactory.getLogger("Sablenautics");
 
+    private static final ResourceLocation INVISIBLE_BOGEY =
+            ResourceLocation.fromNamespaceAndPath("railways", "invisible_bogey");
+    private static final ResourceLocation INVISIBLE_STYLE =
+            ResourceLocation.fromNamespaceAndPath("railways", "invisible");
+
     // Temporary storage for assembled sublevels before train is created.
     // Keyed by contraption, filled during phase 1 (assemble), consumed during phase 2 (registerTrain).
     // Insertion order matches Create's carriage order, so it can be used for carriage indexing.
@@ -30,20 +47,25 @@ public class SableTrainAssembler {
 
     private static class SubLevelData {
         final ServerSubLevel subLevel;
-        final ServerSubLevel bogieSubLevel;
         final CarriageContraption contraption;
+        final List<BogieInfo> bogies;
         List<AABB> superglue = List.of();
-        SubLevelData(ServerSubLevel subLevel, ServerSubLevel bogieSubLevel, CarriageContraption contraption) {
+
+        SubLevelData(ServerSubLevel subLevel, CarriageContraption contraption, List<BogieInfo> bogies) {
             this.subLevel = subLevel;
-            this.bogieSubLevel = bogieSubLevel;
             this.contraption = contraption;
+            this.bogies = bogies;
         }
+    }
+
+    private record BogeyCapture(BlockPos globalPos, ResourceLocation styleId, ResourceLocation sizeId,
+                                CompoundTag bogeyData, Direction.Axis axis, boolean upsideDown,
+                                double wheelRadius, BlockState originalState) {
     }
 
     /**
      * Phase 1: Assemble blocks into a Sable sublevel BEFORE they are removed from world.
      * Called from mixin wrapping removeBlocksFromWorld.
-     * Train doesn't exist yet — store sublevel for later registration.
      */
     public static void assemble(CarriageContraption contraption, Level level) {
         LOGGER.debug("Sablenautics: Start Sublevel assembly");
@@ -52,7 +74,7 @@ public class SableTrainAssembler {
 
         BlockPos anchor = contraption.anchor;
         Set<BlockPos> globalPosSet = new LinkedHashSet<>();
-        Set<BlockPos> bogeyPosSet = new LinkedHashSet<>();
+        List<BogeyCapture> bogeyCaptures = new ArrayList<>();
 
         Map<BlockPos, StructureBlockInfo> blocks = contraption.getBlocks();
         if (blocks == null) {
@@ -64,11 +86,10 @@ public class SableTrainAssembler {
             BlockPos localPos = entry.getKey();
             BlockPos globalPos = localPos.offset(anchor);
             StructureBlockInfo info = entry.getValue();
+            globalPosSet.add(globalPos);
 
-            if (info.state().getBlock() instanceof AbstractBogeyBlock<?>) {
-                bogeyPosSet.add(globalPos);
-            } else {
-                globalPosSet.add(globalPos);
+            if (info.state().getBlock() instanceof AbstractBogeyBlock<?> bogeyBlock) {
+                bogeyCaptures.add(captureBogey(serverLevel, globalPos, info.state(), bogeyBlock));
             }
 
             // Train controls blocks live inside the sub-level, not in a ContraptionWorld, so Create never
@@ -88,6 +109,12 @@ public class SableTrainAssembler {
             return;
         }
 
+        // Hide the wheel model inside the carriage. The visible model lives on a separate
+        // non-Sable entity now.
+        for (BogeyCapture capture : bogeyCaptures) {
+            hideBogeyBlock(serverLevel, capture.globalPos());
+        }
+
         BoundingBox3i bounds = BoundingBox3i.from(globalPosSet);
         if (bounds == null) {
             LOGGER.error("Sablenautics: Sublevel bounds is null");
@@ -100,25 +127,10 @@ public class SableTrainAssembler {
             return;
         }
 
-        // The wheels are a separate rail-bound sub-level. They keep their own block entities so
-        // Create's bogey renderer can still draw the wheel model.
-        ServerSubLevel bogieSublevel = null;
-        if (!bogeyPosSet.isEmpty()) {
-            SubLevel bogieLevel = SubLevelAssemblyHelper.assembleBlocks(serverLevel, anchor, bogeyPosSet, bounds);
-            if (bogieLevel instanceof ServerSubLevel serverBogie) {
-                bogieSublevel = serverBogie;
-            } else {
-                LOGGER.error("Sablenautics: Couldn't cast bogie sublevel to ServerSubLevel");
-            }
-        }
-
         // Make sure the controls model is open inside the plot. The same state was written into
         // the world before assembly, but block updates during the move may have reset it.
         BlockPos plotAnchor = subLevel.getPlot().getCenterBlock();
         for (BlockPos local : blocks.keySet()) {
-            if (blocks.get(local).state().getBlock() instanceof AbstractBogeyBlock<?>) {
-                continue;
-            }
             BlockPos plotPos = plotAnchor.offset(local.getX() - anchor.getX(),
                     local.getY() - anchor.getY(), local.getZ() - anchor.getZ());
             BlockState plotState = serverLevel.getBlockState(plotPos);
@@ -135,12 +147,87 @@ public class SableTrainAssembler {
             return;
         }
 
+        List<BogieInfo> bogies = new ArrayList<>(bogeyCaptures.size());
+        Vector3d plotCenter = new Vector3d(plotAnchor.getX() + 0.5, plotAnchor.getY() + 0.5, plotAnchor.getZ() + 0.5);
+        for (BogeyCapture capture : bogeyCaptures) {
+            BlockPos plotPos = plotAnchor.offset(
+                    capture.globalPos().getX() - anchor.getX(),
+                    capture.globalPos().getY() - anchor.getY(),
+                    capture.globalPos().getZ() - anchor.getZ());
+            Vector3d localCenter = new Vector3d(
+                    plotPos.getX() + 0.5, plotPos.getY() + 0.5, plotPos.getZ() + 0.5);
+            Vec3 initialWorld = new Vec3(
+                    capture.globalPos().getX() + 0.5,
+                    capture.globalPos().getY() + 0.5,
+                    capture.globalPos().getZ() + 0.5);
+            bogies.add(new BogieInfo(localCenter, initialWorld, capture.styleId(), capture.sizeId(),
+                    capture.bogeyData(), capture.axis(), capture.upsideDown(), capture.wheelRadius(),
+                    capture.originalState()));
+        }
+
+        // Create's Carriage lists the leading bogey first; the leading bogey is the one
+        // closest to the carriage anchor (the plot centre).
+        bogies.sort(Comparator.comparingDouble(info -> info.localPlotCenter().distanceSquared(plotCenter)));
+
         // Store for phase 2 (train registration after train is created)
-        PENDING_SUBLEVELS.put(contraption, new SubLevelData(serverSublevel, bogieSublevel, contraption));
-        LOGGER.info("Sablenautics: Assembled Sable sublevel {} (bogie: {}) for contraption (stored for registration)",
-                serverSublevel.getUniqueId(), bogieSublevel != null ? bogieSublevel.getUniqueId() : "none");
+        PENDING_SUBLEVELS.put(contraption, new SubLevelData(serverSublevel, contraption, bogies));
+        LOGGER.info("Sablenautics: Assembled Sable sublevel {} with {} bogey entity/entities",
+                serverSublevel.getUniqueId(), bogies.size());
 
         LOGGER.debug("Sablenautics: End Sublevel assembly");
+    }
+
+    private static BogeyCapture captureBogey(ServerLevel level, BlockPos pos, BlockState state,
+                                             AbstractBogeyBlock<?> block) {
+        ResourceLocation styleId = block.getDefaultStyle().id;
+        CompoundTag bogeyData = new CompoundTag();
+
+        BlockEntity be = level.getBlockEntity(pos);
+        if (be instanceof AbstractBogeyBlockEntity bogeyBe) {
+            styleId = bogeyBe.getStyle().id;
+            bogeyData = bogeyBe.getBogeyData().copy();
+        }
+
+        Direction.Axis axis = state.hasProperty(AbstractBogeyBlock.AXIS)
+                ? state.getValue(AbstractBogeyBlock.AXIS)
+                : Direction.Axis.Z;
+
+        return new BogeyCapture(pos, styleId, block.getSize().id(), bogeyData, axis,
+                block.isUpsideDown(state), block.getWheelRadius(), state);
+    }
+
+    /**
+     * Replaces the real bogey block with Railways' invisible bogey when it is available.
+     * Without Railways only the renderer style is hidden.
+     */
+    private static void hideBogeyBlock(ServerLevel level, BlockPos pos) {
+        BlockState oldState = level.getBlockState(pos);
+        if (!(oldState.getBlock() instanceof AbstractBogeyBlock<?>)) return;
+
+        Block invisibleBlock = BuiltInRegistries.BLOCK.get(INVISIBLE_BOGEY);
+        if (invisibleBlock instanceof AbstractBogeyBlock<?>) {
+            BlockState invisible = invisibleBlock.defaultBlockState();
+            if (invisible.hasProperty(AbstractBogeyBlock.AXIS)
+                    && oldState.hasProperty(AbstractBogeyBlock.AXIS)) {
+                invisible = invisible.setValue(AbstractBogeyBlock.AXIS,
+                        oldState.getValue(AbstractBogeyBlock.AXIS));
+            }
+            if (invisible.hasProperty(BlockStateProperties.WATERLOGGED)
+                    && oldState.hasProperty(BlockStateProperties.WATERLOGGED)) {
+                invisible = invisible.setValue(BlockStateProperties.WATERLOGGED,
+                        oldState.getValue(BlockStateProperties.WATERLOGGED));
+            }
+            level.setBlock(pos, invisible, Block.UPDATE_ALL);
+            return;
+        }
+
+        BlockEntity be = level.getBlockEntity(pos);
+        if (be instanceof AbstractBogeyBlockEntity bogeyBe) {
+            BogeyStyle invisibleStyle = AllBogeyStyles.BOGEY_STYLES.get(INVISIBLE_STYLE);
+            if (invisibleStyle != null) {
+                bogeyBe.setBogeyStyle(invisibleStyle);
+            }
+        }
     }
 
     /**
@@ -159,7 +246,6 @@ public class SableTrainAssembler {
     /**
      * Phase 2: Register the assembled sublevels with the train.
      * Called from mixin at TAIL of StationBlockEntity.assemble(), after train is created.
-     * The train now exists in Create.RAILWAYS.trains.
      */
     public static void registerTrain(Train train) {
         if (train == null) {
@@ -187,8 +273,8 @@ public class SableTrainAssembler {
             }
             if (data == null) continue;
 
-            SableTrainController.registerSubLevel(train, data.subLevel, data.bogieSubLevel, data.contraption,
-                    carriageIndex, data.superglue);
+            SableTrainController.registerSubLevel(train, data.subLevel, data.contraption,
+                    carriageIndex, data.superglue, data.bogies);
             LOGGER.info("Sablenautics: Registered train {} carriage {} with Sable sublevel {}",
                     train.id, carriageIndex, data.subLevel.getUniqueId());
             registered++;

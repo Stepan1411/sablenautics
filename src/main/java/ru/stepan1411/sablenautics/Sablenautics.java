@@ -6,6 +6,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
 import ru.stepan1411.sablenautics.client.ClientSableTrainControls;
+import ru.stepan1411.sablenautics.content.entities.SablenauticsEntities;
 import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
 import ru.stepan1411.sablenautics.index.SablenauticsBlockEntityTypes;
 import ru.stepan1411.sablenautics.network.SablenauticsNetwork;
@@ -27,6 +28,8 @@ public class Sablenautics {
         REGISTRATE.registerEventListeners(modEventBus);
         SablenauticsBlocks.init();
         SablenauticsBlockEntityTypes.init();
+        SablenauticsEntities.ENTITY_TYPES.register(modEventBus);
+        SablenauticsEntities.init();
 
         modEventBus.addListener(SablenauticsNetwork::register);
 
