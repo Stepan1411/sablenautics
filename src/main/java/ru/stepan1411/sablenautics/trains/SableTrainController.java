@@ -348,6 +348,9 @@ public final class SableTrainController {
         data.detached = true;
         data.derailedByDetach = true;
         data.hasTarget = false;
+        // A torn-off carriage must collide with the rest of the train again, so drop the
+        // contact-less joints it shared with its neighbours.
+        restoreNeighbourContacts(data);
         train.derailed = true;
         writeDetachedFlag(data);
         LOGGER.warn("Sablenautics: carriage {} of train {} tore off the rails (offset {} blocks)",
@@ -361,8 +364,35 @@ public final class SableTrainController {
             train.derailed = false;
         }
         writeDetachedFlag(data);
+        // Collisions between this carriage and its neighbours are disabled again.
+        linkNeighbours(train);
         LOGGER.info("Sablenautics: carriage {} of train {} re-attached to the rails",
                 data.carriageIndex(), train.id);
+    }
+
+    /**
+     * Removes the contact-less joints between this carriage and both of its neighbours so
+     * the physics engine starts resolving collisions for the detached body again.
+     */
+    private static void restoreNeighbourContacts(SubLevelData data) {
+        removeConstraint(data.nextContactJoint);
+        data.nextContactJoint = null;
+
+        int previousIndex = data.carriageIndex() - 1;
+        if (previousIndex >= 0) {
+            for (SubLevelData other : SUBLEVELS.values()) {
+                if (other != data
+                        && other.trainId().equals(data.trainId())
+                        && other.carriageIndex() == previousIndex) {
+                    removeConstraint(other.nextContactJoint);
+                    other.nextContactJoint = null;
+                    break;
+                }
+            }
+        }
+
+        // Allow linkNeighbours to rebuild the remaining joints once this carriage is back.
+        LINKED_TRAINS.remove(data.trainId());
     }
 
     private static void updateTargetVelocity(SubLevelData data, Vector3d targetPosition,
@@ -697,6 +727,11 @@ public final class SableTrainController {
             SubLevelData first = ordered[i];
             SubLevelData second = ordered[i + 1];
             if (first == null || second == null) {
+                complete = false;
+                continue;
+            }
+            if (first.detached || second.detached) {
+                // A detached body has to keep colliding with the train.
                 complete = false;
                 continue;
             }
