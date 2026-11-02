@@ -44,6 +44,8 @@ public class SableTrainAssembler {
     private static final Map<CarriageContraption, SubLevelData> PENDING_SUBLEVELS = new LinkedHashMap<>();
     private static final Set<CarriageContraption> SABLE_CONTRAPTIONS =
             Collections.newSetFromMap(new IdentityHashMap<>());
+    /** True when a physics sticker was found anywhere in the train currently being assembled. */
+    private static boolean currentAssemblySable;
 
     private static class SubLevelData {
         final ServerSubLevel subLevel;
@@ -82,17 +84,30 @@ public class SableTrainAssembler {
         return contraption != null && SABLE_CONTRAPTIONS.contains(contraption);
     }
 
+    public static void setCurrentAssemblySable(boolean sable) {
+        currentAssemblySable = sable;
+    }
+
+    public static void resetCurrentAssemblySable() {
+        currentAssemblySable = false;
+    }
+
     public static void clear() {
         PENDING_SUBLEVELS.clear();
         SABLE_CONTRAPTIONS.clear();
+        currentAssemblySable = false;
     }
 
     public static void assemble(CarriageContraption contraption, Level level) {
         LOGGER.debug("Sablenautics: Start Sublevel assembly");
 
         if (!(level instanceof ServerLevel serverLevel)) return;
-        if (!hasPhysicsSticker(contraption)) {
-            LOGGER.debug("Sablenautics: carriage has no physics sticker; keeping it a normal Create carriage");
+
+        // The station pre-scan marks the whole train as Sable when any carriage has a
+        // sticker; the per-carriage check remains as a fallback.
+        boolean sable = currentAssemblySable || hasPhysicsSticker(contraption);
+        if (!sable) {
+            LOGGER.debug("Sablenautics: train has no physics sticker; keeping it a normal Create train");
             return;
         }
 
@@ -313,5 +328,6 @@ public class SableTrainAssembler {
         }
 
         SABLE_CONTRAPTIONS.clear();
+        currentAssemblySable = false;
     }
 }

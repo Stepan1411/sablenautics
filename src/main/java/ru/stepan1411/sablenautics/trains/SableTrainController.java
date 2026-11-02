@@ -82,11 +82,13 @@ public final class SableTrainController {
     public static final double REATTACH_ANGLE = Math.toRadians(35.0);
 
     // Longitudinal suspension is force based so it can stretch and eventually tear off.
-    private static final double LINEAR_STIFFNESS = 120.0;
-    private static final double LINEAR_DAMPING = 22.0;
-    private static final double MAX_LINEAR_ACCELERATION = 400.0;
-    private static final double MAX_TARGET_VELOCITY = 60.0;
+    private static final double LINEAR_STIFFNESS = 90.0;
+    private static final double LINEAR_DAMPING = 20.0;
+    private static final double MAX_LINEAR_ACCELERATION = 120.0;
+    private static final double MAX_TARGET_VELOCITY = 40.0;
     private static final double MAX_TARGET_ANGULAR_VELOCITY = 20.0;
+    private static final double MAX_BODY_SPEED = 40.0;
+    private static final double MAX_TARGET_STEP = 4.0;
 
     /** Body sub-level UUID -> carriage data. */
     private static final Map<UUID, SubLevelData> SUBLEVELS = new HashMap<>();
@@ -304,12 +306,20 @@ public final class SableTrainController {
 
         // Heavier carriages (more blocks) are held more strongly. This keeps short cars
         // soft enough to tear off while long/heavy cars are noticeably stiffer.
-        double massFactor = Math.max(0.5, Math.min(3.0, Math.sqrt(mass / 100.0)));
+        double massFactor = Math.max(0.6, Math.min(2.0, Math.sqrt(mass / 200.0)));
         double stiffness = LINEAR_STIFFNESS * massFactor;
         double damping = LINEAR_DAMPING * massFactor;
         double maxAcceleration = MAX_LINEAR_ACCELERATION * massFactor;
 
         Vector3d velocity = handle.getLinearVelocity(new Vector3d());
+        double speedSquared = velocity.lengthSquared();
+        if (speedSquared > MAX_BODY_SPEED * MAX_BODY_SPEED) {
+            Vector3d correction = new Vector3d(velocity)
+                    .mul(MAX_BODY_SPEED / Math.sqrt(speedSquared) - 1.0);
+            handle.addLinearAndAngularVelocity(correction, new Vector3d());
+            velocity = handle.getLinearVelocity(new Vector3d());
+        }
+
         Vector3d acceleration = new Vector3d(data.targetPosition)
                 .sub(pose.position())
                 .mul(stiffness)
@@ -354,8 +364,15 @@ public final class SableTrainController {
             double dtTicks = Math.max(1L, now - data.lastTargetTick);
             double dt = dtTicks / 20.0;
 
-            data.targetVelocity.set(targetPosition).sub(data.lastTargetPosition).div(dt);
-            clampLength(data.targetVelocity, MAX_TARGET_VELOCITY);
+            // Track nodes and freshly loaded carriages can produce a one-tick target jump.
+            // Feeding that jump into the spring would launch the carriage, so ignore it.
+            double targetStep = targetPosition.distance(data.lastTargetPosition);
+            if (targetStep <= MAX_TARGET_STEP) {
+                data.targetVelocity.set(targetPosition).sub(data.lastTargetPosition).div(dt);
+                clampLength(data.targetVelocity, MAX_TARGET_VELOCITY);
+            } else {
+                data.targetVelocity.zero();
+            }
 
             Quaterniond delta = new Quaterniond(targetOrientation)
                     .mul(new Quaterniond(data.lastTargetOrientation).conjugate())
