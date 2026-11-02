@@ -424,8 +424,6 @@ public final class SableTrainController {
             if (!other.trainId().equals(train.id)) continue;
 
             other.flyOffAnchor = anchor;
-            // Allow ANY detached carriage to trigger auto-attach. The one at blockedIndex
-            // gets priority, but others can also try if they find track first.
             other.autoAttachTrigger = true;
             if (!other.detached) {
                 removeRailJoint(other);
@@ -457,7 +455,6 @@ public final class SableTrainController {
             return false;
         }
 
-        LOGGER.info("Sablenautics: relocated train {} onto the track at {}", train.id, trackPos);
         teleportToRails(train);
         return true;
     }
@@ -489,7 +486,6 @@ public final class SableTrainController {
             return false;
         }
 
-        LOGGER.info("Sablenautics: relocated train {} onto bezier curve at {}->{} segment {}", train.id, trackBEPos, curveTarget, segment);
         teleportToRails(train);
         return true;
     }
@@ -501,20 +497,14 @@ public final class SableTrainController {
      */
     private static boolean tryAttachToNearbyTrack(ServerSubLevel body, ServerLevel level, Train train,
                                                   SubLevelData data) {
-        LOGGER.info("Sablenautics: tryAttachToNearbyTrack called for train {} carriage {} detached={} autoAttachTrigger={}",
-                train.id, data.carriageIndex(), data.detached, data.autoAttachTrigger);
         if (!data.detached) return false;
         if (!data.autoAttachTrigger) return false;
-        // A single carriage that was pushed off keeps trying its own rail target. Only a train
-        // that left the rails as a whole is allowed to latch onto a completely different track.
         if (!allCarriagesDetached(train)) return false;
 
         long now = level.getGameTime();
         if (now < data.nextAttachAttemptTick) return false;
 
-        // Collect track candidates from ALL detached carriages of this train, not just this one.
-        // The trigger carriage might be at the end of the old track while other carriages
-        // are already over new track.
+        // Collect track candidates from ALL detached carriages of this train
         List<TrackCandidate> candidates = new ArrayList<>();
         for (SubLevelData other : SUBLEVELS.values()) {
             if (!other.trainId().equals(train.id) || !other.detached) continue;
@@ -524,7 +514,6 @@ public final class SableTrainController {
         }
 
         if (candidates.isEmpty()) {
-            LOGGER.info("Sablenautics: no track candidates found for any carriage of train {}", train.id);
             data.nextAttachAttemptTick = now + AUTO_ATTACH_SCAN_INTERVAL;
             return false;
         }
@@ -540,10 +529,7 @@ public final class SableTrainController {
         }
 
         Vec3 direction = trackDirection(body, data);
-        LOGGER.info("Sablenautics: trying {} unique track candidates for train {} with direction {}", unique.size(), train.id, direction);
         for (TrackCandidate candidate : unique) {
-            LOGGER.info("Sablenautics: trying candidate {} (bezier={}, pos={}, curveTarget={}, segment={})",
-                    candidate.isBezier() ? "bezier" : "track", candidate.isBezier(), candidate.pos, candidate.curveTarget, candidate.segment);
             boolean success;
             if (candidate.isBezier()) {
                 success = relocateToBezier(train, level, candidate.pos, candidate.curveTarget, candidate.segment, direction);
@@ -551,14 +537,10 @@ public final class SableTrainController {
                 success = relocateToTrack(train, level, candidate.pos, direction);
             }
             if (success) {
-                LOGGER.info("Sablenautics: auto-attached train {} to {} at {}", train.id, candidate.isBezier() ? "bezier" : "track", candidate.pos);
                 return true;
-            } else {
-                LOGGER.info("Sablenautics: relocation failed for candidate {}", candidate.pos);
             }
         }
 
-        // The probes walk the whole train, so don't repeat them every single tick.
         data.nextAttachAttemptTick = now + AUTO_ATTACH_RETRY_TICKS;
         return false;
     }
@@ -598,11 +580,15 @@ public final class SableTrainController {
 
                     // Check if the bogey is actually near this bezier curve using its bounds
                     AABB bounds = bc.getBounds();
-                    AABB inflated = bounds.inflate(3.0);
+                    AABB inflated = bounds.inflate(5.0);
                     if (!inflated.contains(centerVec)) {
-                        continue;
+                        // Fallback: check distance to curve start/end points
+                        Vec3 start = bc.starts.getFirst();
+                        Vec3 end = bc.starts.getSecond();
+                        if (centerVec.distanceTo(start) > 5.0 && centerVec.distanceTo(end) > 5.0) {
+                            continue;
+                        }
                     }
-                    LOGGER.info("Sablenautics: bogey {} INSIDE bezier bounds {} at bePos {}", centerVec, bounds, bePos);
 
                     // The curve is stored at the target position; we check if our bogey is near the curve
                     int maxSegments = bc.getSegmentCount();
@@ -695,10 +681,8 @@ public final class SableTrainController {
                     Vec3 bogeyVec = new Vec3(world.x, world.y, world.z);
                     AABB inflated = bounds.inflate(3.0);
                     if (!inflated.contains(bogeyVec)) {
-                        LOGGER.info("Sablenautics: bogey {} not in bezier bounds {} (inflated {}) at bePos {}", bogeyVec, bounds, inflated, bePos);
                         continue;
                     }
-                    LOGGER.info("Sablenautics: bogey {} INSIDE bezier bounds {} at bePos {}", bogeyVec, bounds, bePos);
 
                     // The curve is stored at the target position; we check if our bogey is near the curve
                     int maxSegments = bc.getSegmentCount();
@@ -714,13 +698,11 @@ public final class SableTrainController {
         }
 
         if (candidates.isEmpty()) {
-            LOGGER.debug("Sablenautics: no track candidates found for train {}", data.trainId());
             return candidates;
         }
 
         Vec3 reference = bogieCenters.isEmpty() ? candidates.get(0).worldPos : bogieCenters.get(0);
         candidates.sort(Comparator.comparingDouble(c -> c.worldPos.distanceToSqr(reference)));
-        LOGGER.debug("Sablenautics: found {} track candidates for train {}", candidates.size(), data.trainId());
         return candidates.size() > 5 ? new ArrayList<>(candidates.subList(0, 5)) : candidates;
     }
 
