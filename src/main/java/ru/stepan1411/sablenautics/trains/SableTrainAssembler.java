@@ -1,10 +1,8 @@
 package ru.stepan1411.sablenautics.trains;
 
-import com.simibubi.create.AllBogeyStyles;
 import com.simibubi.create.content.contraptions.actors.trainControls.ControlsBlock;
 import com.simibubi.create.content.trains.bogey.AbstractBogeyBlock;
 import com.simibubi.create.content.trains.bogey.AbstractBogeyBlockEntity;
-import com.simibubi.create.content.trains.bogey.BogeyStyle;
 import com.simibubi.create.content.trains.entity.*;
 import dev.ryanhcode.sable.api.SubLevelAssemblyHelper;
 import dev.ryanhcode.sable.companion.math.BoundingBox3i;
@@ -12,15 +10,13 @@ import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.SubLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate.StructureBlockInfo;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -34,11 +30,6 @@ import java.util.*;
 
 public class SableTrainAssembler {
     private static final Logger LOGGER = LoggerFactory.getLogger("Sablenautics");
-
-    private static final ResourceLocation INVISIBLE_BOGEY =
-            ResourceLocation.fromNamespaceAndPath("railways", "invisible_bogey");
-    private static final ResourceLocation INVISIBLE_STYLE =
-            ResourceLocation.fromNamespaceAndPath("railways", "invisible");
 
     // Temporary storage for assembled sublevels before train is created.
     // Keyed by contraption, filled during phase 1 (assemble), consumed during phase 2 (registerTrain).
@@ -86,10 +77,12 @@ public class SableTrainAssembler {
             BlockPos localPos = entry.getKey();
             BlockPos globalPos = localPos.offset(anchor);
             StructureBlockInfo info = entry.getValue();
-            globalPosSet.add(globalPos);
 
             if (info.state().getBlock() instanceof AbstractBogeyBlock<?> bogeyBlock) {
+                // The wheel block is removed from the carriage; its model is drawn by an entity.
                 bogeyCaptures.add(captureBogey(serverLevel, globalPos, info.state(), bogeyBlock));
+            } else {
+                globalPosSet.add(globalPos);
             }
 
             // Train controls blocks live inside the sub-level, not in a ContraptionWorld, so Create never
@@ -109,10 +102,10 @@ public class SableTrainAssembler {
             return;
         }
 
-        // Hide the wheel model inside the carriage. The visible model lives on a separate
-        // non-Sable entity now.
+        // Remove the wheel blocks from the carriage. The visible model lives on a separate
+        // non-Sable entity now, and leaving a block there makes that entity render dark.
         for (BogeyCapture capture : bogeyCaptures) {
-            hideBogeyBlock(serverLevel, capture.globalPos());
+            serverLevel.setBlock(capture.globalPos(), Blocks.AIR.defaultBlockState(), 2);
         }
 
         BoundingBox3i bounds = BoundingBox3i.from(globalPosSet);
@@ -194,40 +187,6 @@ public class SableTrainAssembler {
 
         return new BogeyCapture(pos, styleId, block.getSize().id(), bogeyData, axis,
                 block.isUpsideDown(state), block.getWheelRadius(), state);
-    }
-
-    /**
-     * Replaces the real bogey block with Railways' invisible bogey when it is available.
-     * Without Railways only the renderer style is hidden.
-     */
-    private static void hideBogeyBlock(ServerLevel level, BlockPos pos) {
-        BlockState oldState = level.getBlockState(pos);
-        if (!(oldState.getBlock() instanceof AbstractBogeyBlock<?>)) return;
-
-        Block invisibleBlock = BuiltInRegistries.BLOCK.get(INVISIBLE_BOGEY);
-        if (invisibleBlock instanceof AbstractBogeyBlock<?>) {
-            BlockState invisible = invisibleBlock.defaultBlockState();
-            if (invisible.hasProperty(AbstractBogeyBlock.AXIS)
-                    && oldState.hasProperty(AbstractBogeyBlock.AXIS)) {
-                invisible = invisible.setValue(AbstractBogeyBlock.AXIS,
-                        oldState.getValue(AbstractBogeyBlock.AXIS));
-            }
-            if (invisible.hasProperty(BlockStateProperties.WATERLOGGED)
-                    && oldState.hasProperty(BlockStateProperties.WATERLOGGED)) {
-                invisible = invisible.setValue(BlockStateProperties.WATERLOGGED,
-                        oldState.getValue(BlockStateProperties.WATERLOGGED));
-            }
-            level.setBlock(pos, invisible, Block.UPDATE_ALL);
-            return;
-        }
-
-        BlockEntity be = level.getBlockEntity(pos);
-        if (be instanceof AbstractBogeyBlockEntity bogeyBe) {
-            BogeyStyle invisibleStyle = AllBogeyStyles.BOGEY_STYLES.get(INVISIBLE_STYLE);
-            if (invisibleStyle != null) {
-                bogeyBe.setBogeyStyle(invisibleStyle);
-            }
-        }
     }
 
     /**

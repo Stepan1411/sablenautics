@@ -129,10 +129,8 @@ public class SableBogeyEntity extends Entity {
         setYRot((float) Math.toDegrees(-euler.y));
         setXRot((float) Math.toDegrees(euler.x));
 
-        if (target.attached()) {
-            float angle = entityData.get(WHEEL_ANGLE) - target.wheelAngleDelta();
-            entityData.set(WHEEL_ANGLE, angle % 360.0f);
-        }
+        float angle = entityData.get(WHEEL_ANGLE) - target.wheelAngleDelta();
+        entityData.set(WHEEL_ANGLE, angle % 360.0f);
     }
 
     @Override

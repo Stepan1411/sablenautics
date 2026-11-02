@@ -302,12 +302,19 @@ public final class SableTrainController {
         Pose3d pose = subLevel.logicalPose();
         Quaterniond inverseOrientation = new Quaterniond(pose.orientation()).conjugate();
 
+        // Heavier carriages (more blocks) are held more strongly. This keeps short cars
+        // soft enough to tear off while long/heavy cars are noticeably stiffer.
+        double massFactor = Math.max(0.5, Math.min(3.0, Math.sqrt(mass / 100.0)));
+        double stiffness = LINEAR_STIFFNESS * massFactor;
+        double damping = LINEAR_DAMPING * massFactor;
+        double maxAcceleration = MAX_LINEAR_ACCELERATION * massFactor;
+
         Vector3d velocity = handle.getLinearVelocity(new Vector3d());
         Vector3d acceleration = new Vector3d(data.targetPosition)
                 .sub(pose.position())
-                .mul(LINEAR_STIFFNESS)
-                .fma(LINEAR_DAMPING, new Vector3d(data.targetVelocity).sub(velocity));
-        clampLength(acceleration, MAX_LINEAR_ACCELERATION);
+                .mul(stiffness)
+                .fma(damping, new Vector3d(data.targetVelocity).sub(velocity));
+        clampLength(acceleration, maxAcceleration);
 
         // Cancel gravity so the suspension only has to track the rail target.
         Vector3d gravity = DimensionPhysicsData.getGravity(subLevel.getLevel(), pose.position(), new Vector3d());
@@ -481,8 +488,7 @@ public final class SableTrainController {
         return new Vector3d(center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5);
     }
 
-    public record BogieTarget(Vec3 position, Quaterniond orientation, boolean attached,
-                              float wheelAngleDelta) {
+    public record BogieTarget(Vec3 position, Quaterniond orientation, float wheelAngleDelta) {
     }
 
     public static List<BogieInfo> bogiesFor(ServerSubLevel body) {
@@ -511,31 +517,17 @@ public final class SableTrainController {
         Train train = Create.RAILWAYS.trains.get(trainId);
         if (train == null || carriageIndex < 0 || carriageIndex >= train.carriages.size()) return null;
 
-        Carriage carriage = train.carriages.get(carriageIndex);
-        carriage.updateContraptionAnchors();
-
-        ServerLevel level = body.getLevel();
-        DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(level.dimension());
-        if (dce == null || dce.positionAnchor == null) return null;
-
         BogieInfo info = data.bogies().get(bogieIndex);
-        Vector3dc centerOfMass = body.getMassTracker().getCenterOfMass();
-        if (centerOfMass == null) return null;
 
-        if (!data.detached()) {
-            Quaterniond targetOrientation = computeTargetOrientation(dce, body.logicalPose(), data.initialYaw());
-            Vector3d targetPosition = computeTargetPosition(body, dce.positionAnchor, targetOrientation);
-            Vector3d localOffset = new Vector3d(info.localPlotCenter()).sub(centerOfMass);
-            Vector3d world = new Vector3d(targetPosition)
-                    .add(targetOrientation.transform(localOffset, new Vector3d()));
-            float angleDelta = (float) (360.0 * train.speed / (Math.PI * 2.0 * info.wheelRadius()));
-            return new BogieTarget(new Vec3(world.x, world.y, world.z), targetOrientation, true, angleDelta);
-        }
-
+        // The wheel entity is glued to the carriage body. The body itself is what is held
+        // on the rails by the suspension, so the bogey can never jitter against the train.
         Pose3d bodyPose = body.logicalPose();
         Vector3d world = bodyPose.transformPosition(info.localPlotCenter(), new Vector3d());
+        float angleDelta = data.detached()
+                ? 0.0f
+                : (float) (360.0 * train.speed / (Math.PI * 2.0 * info.wheelRadius()));
         return new BogieTarget(new Vec3(world.x, world.y, world.z),
-                new Quaterniond(bodyPose.orientation()), false, 0.0f);
+                new Quaterniond(bodyPose.orientation()), angleDelta);
     }
 
     private static void teleport(ServerSubLevel subLevel, Vector3d position, Quaterniond orientation,
