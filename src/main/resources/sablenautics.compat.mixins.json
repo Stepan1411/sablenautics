@@ -1,6 +1,6 @@
 {
   "required": false,
-  "package": "ru.stepan1411.sablenautics.compact",
+  "package": "ru.stepan1411.sablenautics.compat.mixins",
   "compatibilityLevel": "JAVA_21",
   "mixins": [],
   "client": []
