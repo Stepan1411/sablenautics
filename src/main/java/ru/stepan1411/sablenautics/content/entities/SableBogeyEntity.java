@@ -47,16 +47,6 @@ public class SableBogeyEntity extends Entity {
             SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.FLOAT);
     private static final EntityDataAccessor<Float> QW =
             SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.FLOAT);
-    private static final EntityDataAccessor<Long> BODY_ID_MOST =
-            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.LONG);
-    private static final EntityDataAccessor<Long> BODY_ID_LEAST =
-            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.LONG);
-    private static final EntityDataAccessor<Long> LOCAL_X =
-            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.LONG);
-    private static final EntityDataAccessor<Long> LOCAL_Y =
-            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.LONG);
-    private static final EntityDataAccessor<Long> LOCAL_Z =
-            SynchedEntityData.defineId(SableBogeyEntity.class, EntityDataSerializers.LONG);
 
     private static final Set<SableBogeyEntity> TRACKED = ConcurrentHashMap.newKeySet();
 
@@ -69,6 +59,12 @@ public class SableBogeyEntity extends Entity {
     private float previousWheelAngle;
     private float wheelAngle;
     private boolean wheelAngleSet;
+
+    private Vec3 previousRailPosition = Vec3.ZERO;
+    private Vec3 railPosition = Vec3.ZERO;
+    private final Quaternionf previousRailOrientation = new Quaternionf();
+    private final Quaternionf railOrientation = new Quaternionf();
+    private boolean railPoseSet;
 
     public SableBogeyEntity(EntityType<?> type, Level level) {
         super(type, level);
@@ -87,15 +83,9 @@ public class SableBogeyEntity extends Entity {
         builder.define(QY, 0.0f);
         builder.define(QZ, 0.0f);
         builder.define(QW, 1.0f);
-        builder.define(BODY_ID_MOST, 0L);
-        builder.define(BODY_ID_LEAST, 0L);
-        builder.define(LOCAL_X, 0L);
-        builder.define(LOCAL_Y, 0L);
-        builder.define(LOCAL_Z, 0L);
     }
 
-    public void configure(UUID trainId, int carriageIndex, UUID bodySubLevelId,
-                          int bogieIndex, BogieInfo info) {
+    public void configure(UUID trainId, int carriageIndex, int bogieIndex, BogieInfo info) {
         this.trainId = trainId;
         this.carriageIndex = carriageIndex;
         this.bogieIndex = bogieIndex;
@@ -107,39 +97,9 @@ public class SableBogeyEntity extends Entity {
         entityData.set(AXIS, info.axis().ordinal());
         entityData.set(QW, 1.0f);
 
-        setBodySubLevelId(bodySubLevelId);
-        Vector3d localCenter = info.localPlotCenter();
-        entityData.set(LOCAL_X, Double.doubleToLongBits(localCenter.x));
-        entityData.set(LOCAL_Y, Double.doubleToLongBits(localCenter.y));
-        entityData.set(LOCAL_Z, Double.doubleToLongBits(localCenter.z));
-
         Vec3 initial = info.initialWorldPosition();
         setPos(initial.x, initial.y, initial.z);
         setOldPosAndRot();
-    }
-
-    private void setBodySubLevelId(@Nullable UUID bodySubLevelId) {
-        entityData.set(BODY_ID_MOST, bodySubLevelId == null ? 0L : bodySubLevelId.getMostSignificantBits());
-        entityData.set(BODY_ID_LEAST, bodySubLevelId == null ? 0L : bodySubLevelId.getLeastSignificantBits());
-    }
-
-    /**
-     * @return the Sable sub-level that carries this bogey's carriage, or null for legacy data
-     */
-    public @Nullable UUID getBodySubLevelId() {
-        long most = entityData.get(BODY_ID_MOST);
-        long least = entityData.get(BODY_ID_LEAST);
-        return most == 0L && least == 0L ? null : new UUID(most, least);
-    }
-
-    /**
-     * @return this bogey's centre in the carriage sub-level's plot coordinates
-     */
-    public Vector3d getLocalPlotCenter() {
-        return new Vector3d(
-                Double.longBitsToDouble(entityData.get(LOCAL_X)),
-                Double.longBitsToDouble(entityData.get(LOCAL_Y)),
-                Double.longBitsToDouble(entityData.get(LOCAL_Z)));
     }
 
     @Override
@@ -147,9 +107,10 @@ public class SableBogeyEntity extends Entity {
         super.tick();
 
         if (level().isClientSide) {
-            // The world position is rendered from the carriage sub-level's interpolated pose.
-            // Only the wheel spin needs its own client interpolation, because the angle is
-            // synced once per tick as a wrapped 0..360 value.
+            // The world position comes from the rail target synced by the server, not from
+            // the carriage body: the body may sway away from the rails but the wheels must
+            // stay on the track. Buffer two ticks so rendering can interpolate between
+            // them without the extra delay of vanilla entity lerping.
             float syncedAngle = entityData.get(WHEEL_ANGLE);
             if (!wheelAngleSet) {
                 previousWheelAngle = syncedAngle;
@@ -158,6 +119,21 @@ public class SableBogeyEntity extends Entity {
             } else {
                 previousWheelAngle = wheelAngle;
                 wheelAngle += Mth.wrapDegrees(syncedAngle - wheelAngle);
+            }
+
+            Vec3 currentPosition = new Vec3(getX(), getY(), getZ());
+            Quaternionf currentOrientation = getSyncedOrientation();
+            if (!railPoseSet) {
+                previousRailPosition = currentPosition;
+                railPosition = currentPosition;
+                previousRailOrientation.set(currentOrientation);
+                railOrientation.set(currentOrientation);
+                railPoseSet = true;
+            } else {
+                previousRailPosition = railPosition;
+                railPosition = currentPosition;
+                previousRailOrientation.set(railOrientation);
+                railOrientation.set(currentOrientation);
             }
             return;
         }
@@ -197,13 +173,6 @@ public class SableBogeyEntity extends Entity {
     }
 
     @Override
-    public void lerpTo(double x, double y, double z, float yRot, float xRot, int steps) {
-        // Keep at least a tiny interpolation window; without it fast-moving trains make
-        // the model visibly snap from tick to tick.
-        super.lerpTo(x, y, z, yRot, xRot, Math.max(2, steps));
-    }
-
-    @Override
     public void remove(RemovalReason reason) {
         TRACKED.remove(this);
         super.remove(reason);
@@ -219,12 +188,6 @@ public class SableBogeyEntity extends Entity {
         tag.put("BogeyData", entityData.get(BOGEY_DATA).copy());
         tag.putInt("Axis", entityData.get(AXIS));
         tag.putDouble("WheelRadius", wheelRadius);
-        UUID bodySubLevelId = getBodySubLevelId();
-        if (bodySubLevelId != null) tag.putUUID("BodySubLevel", bodySubLevelId);
-        Vector3d localCenter = getLocalPlotCenter();
-        tag.putDouble("LocalX", localCenter.x);
-        tag.putDouble("LocalY", localCenter.y);
-        tag.putDouble("LocalZ", localCenter.z);
     }
 
     @Override
@@ -232,10 +195,6 @@ public class SableBogeyEntity extends Entity {
         trainId = tag.hasUUID("Train") ? tag.getUUID("Train") : null;
         carriageIndex = tag.getInt("Carriage");
         bogieIndex = tag.getInt("Bogie");
-        setBodySubLevelId(tag.hasUUID("BodySubLevel") ? tag.getUUID("BodySubLevel") : null);
-        entityData.set(LOCAL_X, Double.doubleToLongBits(tag.getDouble("LocalX")));
-        entityData.set(LOCAL_Y, Double.doubleToLongBits(tag.getDouble("LocalY")));
-        entityData.set(LOCAL_Z, Double.doubleToLongBits(tag.getDouble("LocalZ")));
         entityData.set(STYLE, tag.getString("Style"));
         entityData.set(SIZE, tag.getString("Size"));
         entityData.set(BOGEY_DATA, tag.getCompound("BogeyData").copy());
@@ -273,6 +232,29 @@ public class SableBogeyEntity extends Entity {
 
     public Quaternionf getSyncedOrientation() {
         return new Quaternionf(entityData.get(QX), entityData.get(QY), entityData.get(QZ), entityData.get(QW));
+    }
+
+    /**
+     * @return the rail-target position interpolated between the last two client ticks
+     */
+    public Vec3 getInterpolatedRailPosition(float partialTick) {
+        if (!railPoseSet) {
+            return new Vec3(getX(), getY(), getZ());
+        }
+        return new Vec3(
+                Mth.lerp(partialTick, previousRailPosition.x, railPosition.x),
+                Mth.lerp(partialTick, previousRailPosition.y, railPosition.y),
+                Mth.lerp(partialTick, previousRailPosition.z, railPosition.z));
+    }
+
+    /**
+     * @return the rail-target orientation interpolated between the last two client ticks
+     */
+    public Quaternionf getInterpolatedRailOrientation(float partialTick) {
+        if (!railPoseSet) {
+            return getSyncedOrientation();
+        }
+        return new Quaternionf(previousRailOrientation).slerp(railOrientation, partialTick);
     }
 
     @Override

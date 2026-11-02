@@ -201,7 +201,7 @@ public final class SableTrainController {
         if (subLevel.getLevel() instanceof ServerLevel level) {
             for (int i = 0; i < safeBogies.size(); i++) {
                 SableBogeyEntity entity = new SableBogeyEntity(SablenauticsEntities.SABLE_BOGEY.get(), level);
-                entity.configure(train.id, carriageIndex, subLevel.getUniqueId(), i, safeBogies.get(i));
+                entity.configure(train.id, carriageIndex, i, safeBogies.get(i));
                 level.addFreshEntity(entity);
             }
         }
