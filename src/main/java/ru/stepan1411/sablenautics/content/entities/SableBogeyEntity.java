@@ -55,6 +55,9 @@ public class SableBogeyEntity extends Entity {
     private double wheelRadius = 0.5;
     private int orphanTicks;
 
+    private final Quaternionf smoothOrientation = new Quaternionf();
+    private boolean smoothOrientationSet;
+
     public SableBogeyEntity(EntityType<?> type, Level level) {
         super(type, level);
         this.noPhysics = true;
@@ -96,6 +99,13 @@ public class SableBogeyEntity extends Entity {
         super.tick();
 
         if (level().isClientSide) {
+            Quaternionf target = getSyncedOrientation();
+            if (!smoothOrientationSet) {
+                smoothOrientation.set(target);
+                smoothOrientationSet = true;
+            } else {
+                smoothOrientation.slerp(target, 0.35f);
+            }
             return;
         }
 
@@ -131,6 +141,13 @@ public class SableBogeyEntity extends Entity {
 
         float angle = entityData.get(WHEEL_ANGLE) - target.wheelAngleDelta();
         entityData.set(WHEEL_ANGLE, angle % 360.0f);
+    }
+
+    @Override
+    public void lerpTo(double x, double y, double z, float yRot, float xRot, int steps) {
+        // Keep at least a tiny interpolation window; without it fast-moving trains make
+        // the model visibly snap from tick to tick.
+        super.lerpTo(x, y, z, yRot, xRot, Math.max(2, steps));
     }
 
     @Override
@@ -190,6 +207,10 @@ public class SableBogeyEntity extends Entity {
 
     public Quaternionf getSyncedOrientation() {
         return new Quaternionf(entityData.get(QX), entityData.get(QY), entityData.get(QZ), entityData.get(QW));
+    }
+
+    public Quaternionf getSmoothedOrientation() {
+        return new Quaternionf(smoothOrientationSet ? smoothOrientation : getSyncedOrientation());
     }
 
     @Override

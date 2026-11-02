@@ -5,6 +5,7 @@ import com.mojang.math.Axis;
 import com.simibubi.create.AllBogeyStyles;
 import com.simibubi.create.content.trains.bogey.BogeySizes;
 import com.simibubi.create.content.trains.bogey.BogeyStyle;
+import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
@@ -34,13 +35,16 @@ public class SableBogeyRenderer extends EntityRenderer<SableBogeyEntity> {
         }
 
         poseStack.pushPose();
-        poseStack.mulPose(entity.getSyncedOrientation());
+        poseStack.mulPose(entity.getSmoothedOrientation());
         if (entity.getBogeyAxis() == Direction.Axis.X) {
             poseStack.mulPose(Axis.YP.rotationDegrees(90));
         }
 
-        style.render(size, partialTick, poseStack, buffer, packedLight, OverlayTexture.NO_OVERLAY,
-                entity.getWheelAngle(partialTick), entity.getBogeyRenderData(), false);
+        // The invisible bogey block may occupy the same space; render unlit so the model
+        // can never turn black when it is technically inside a block.
+        style.render(size, partialTick, poseStack, buffer, LightTexture.FULL_BRIGHT,
+                OverlayTexture.NO_OVERLAY, entity.getWheelAngle(partialTick),
+                entity.getBogeyRenderData(), false);
         poseStack.popPose();
     }
 }
