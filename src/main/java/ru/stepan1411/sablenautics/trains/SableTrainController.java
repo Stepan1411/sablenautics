@@ -4,6 +4,7 @@ import com.simibubi.create.Create;
 import com.simibubi.create.content.contraptions.glue.SuperGlueEntity;
 import com.simibubi.create.content.trains.entity.Carriage;
 import com.simibubi.create.content.trains.entity.Carriage.DimensionalCarriageEntity;
+import com.simibubi.create.content.trains.entity.CarriageBogey;
 import com.simibubi.create.content.trains.entity.CarriageContraption;
 import com.simibubi.create.content.trains.entity.Train;
 import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
@@ -590,8 +591,15 @@ public final class SableTrainController {
                 Vector3d localOffset = new Vector3d(info.localPlotCenter()).sub(centerOfMass);
                 Vector3d world = new Vector3d(targetPosition)
                         .add(targetOrientation.transform(localOffset, new Vector3d()));
+
+                // Each Create bogey follows its own pair of travelling points, so on curves
+                // it turns relative to the carriage. Apply the same relative yaw/pitch that
+                // CarriageContraptionEntityRenderer.translateBogey uses for normal trains.
+                Quaterniond bogieOrientation = new Quaterniond(targetOrientation);
+                applyBogieAngles(bogieOrientation, carriageBogey(carriage, bogieIndex), train);
+
                 float angleDelta = (float) (360.0 * train.speed / (Math.PI * 2.0 * info.wheelRadius()));
-                return new BogieTarget(new Vec3(world.x, world.y, world.z), targetOrientation, angleDelta);
+                return new BogieTarget(new Vec3(world.x, world.y, world.z), bogieOrientation, angleDelta);
             }
         }
 
@@ -599,6 +607,40 @@ public final class SableTrainController {
         Vector3d world = bodyPose.transformPosition(info.localPlotCenter(), new Vector3d());
         return new BogieTarget(new Vec3(world.x, world.y, world.z),
                 new Quaterniond(bodyPose.orientation()), 0.0f);
+    }
+
+    private static @Nullable CarriageBogey carriageBogey(Carriage carriage, int bogieIndex) {
+        if (bogieIndex == 0) return carriage.leadingBogey();
+        if (bogieIndex == 1 && carriage.isOnTwoBogeys()) return carriage.trailingBogey();
+        return null;
+    }
+
+    /**
+     * Adds the bogey's own yaw/pitch relative to the carriage, matching
+     * {@code CarriageBogey#updateAngles} and
+     * {@code CarriageContraptionEntityRenderer#translateBogey}.
+     */
+    private static void applyBogieAngles(Quaterniond orientation, @Nullable CarriageBogey bogey, Train train) {
+        if (bogey == null || train.graph == null) return;
+
+        var leading = bogey.leading();
+        var trailing = bogey.trailing();
+        if (leading.edge == null || trailing.edge == null) return;
+
+        Vec3 first = leading.getPosition(train.graph);
+        Vec3 second = trailing.getPosition(train.graph);
+        double diffX = first.x - second.x;
+        double diffY = first.y - second.y;
+        double diffZ = first.z - second.z;
+        double horizontal = Math.sqrt(diffX * diffX + diffZ * diffZ);
+        if (horizontal < 1.0e-6 && Math.abs(diffY) < 1.0e-6) return;
+
+        double yaw = Math.atan2(diffZ, diffX) * 180.0 / Math.PI + 90.0;
+        double pitch = Math.atan2(diffY, horizontal) * 180.0 / Math.PI;
+
+        orientation.mul(new Quaterniond()
+                .rotateY(Math.toRadians(-yaw))
+                .rotateX(Math.toRadians(pitch)));
     }
 
     /**
