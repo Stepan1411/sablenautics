@@ -11,6 +11,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.util.Mth;
 import org.jetbrains.annotations.Nullable;
 import org.joml.Quaterniond;
 import org.joml.Quaternionf;
@@ -65,10 +66,9 @@ public class SableBogeyEntity extends Entity {
     private double wheelRadius = 0.5;
     private int orphanTicks;
 
-    private final Quaternionf smoothOrientation = new Quaternionf();
-    private boolean smoothOrientationSet;
-    private Vec3 smoothPosition = Vec3.ZERO;
-    private boolean smoothPositionSet;
+    private float previousWheelAngle;
+    private float wheelAngle;
+    private boolean wheelAngleSet;
 
     public SableBogeyEntity(EntityType<?> type, Level level) {
         super(type, level);
@@ -147,20 +147,17 @@ public class SableBogeyEntity extends Entity {
         super.tick();
 
         if (level().isClientSide) {
-            Quaternionf target = getSyncedOrientation();
-            if (!smoothOrientationSet) {
-                smoothOrientation.set(target);
-                smoothOrientationSet = true;
+            // The world position is rendered from the carriage sub-level's interpolated pose.
+            // Only the wheel spin needs its own client interpolation, because the angle is
+            // synced once per tick as a wrapped 0..360 value.
+            float syncedAngle = entityData.get(WHEEL_ANGLE);
+            if (!wheelAngleSet) {
+                previousWheelAngle = syncedAngle;
+                wheelAngle = syncedAngle;
+                wheelAngleSet = true;
             } else {
-                smoothOrientation.slerp(target, 0.35f);
-            }
-
-            Vec3 position = new Vec3(getX(), getY(), getZ());
-            if (!smoothPositionSet) {
-                smoothPosition = position;
-                smoothPositionSet = true;
-            } else {
-                smoothPosition = smoothPosition.lerp(position, 0.5);
+                previousWheelAngle = wheelAngle;
+                wheelAngle += Mth.wrapDegrees(syncedAngle - wheelAngle);
             }
             return;
         }
@@ -268,19 +265,14 @@ public class SableBogeyEntity extends Entity {
     }
 
     public float getWheelAngle(float partialTick) {
-        return entityData.get(WHEEL_ANGLE);
+        if (!wheelAngleSet) {
+            return entityData.get(WHEEL_ANGLE);
+        }
+        return Mth.lerp(partialTick, previousWheelAngle, wheelAngle);
     }
 
     public Quaternionf getSyncedOrientation() {
         return new Quaternionf(entityData.get(QX), entityData.get(QY), entityData.get(QZ), entityData.get(QW));
-    }
-
-    public Quaternionf getSmoothedOrientation() {
-        return new Quaternionf(smoothOrientationSet ? smoothOrientation : getSyncedOrientation());
-    }
-
-    public Vec3 getSmoothedPosition() {
-        return smoothPositionSet ? smoothPosition : position();
     }
 
     @Override
