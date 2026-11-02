@@ -13,11 +13,16 @@ import com.simibubi.create.content.trains.entity.Carriage.DimensionalCarriageEnt
 import com.simibubi.create.content.trains.entity.CarriageBogey;
 import com.simibubi.create.content.trains.entity.CarriageContraption;
 import com.simibubi.create.content.trains.entity.Train;
-import com.simibubi.create.content.trains.entity.TrainRelocator;
-import com.simibubi.create.content.trains.track.BezierConnection;
-import com.simibubi.create.content.trains.track.BezierTrackPointLocation;
+import com.simibubi.create.content.trains.entity.TravellingPoint;
+import com.simibubi.create.content.trains.entity.TravellingPoint.IEdgePointListener;
+import com.simibubi.create.content.trains.entity.TravellingPoint.ITrackSelector;
+import com.simibubi.create.content.trains.entity.TravellingPoint.ITurnListener;
+import com.simibubi.create.content.trains.graph.TrackEdge;
+import com.simibubi.create.content.trains.graph.TrackGraph;
+import com.simibubi.create.content.trains.graph.TrackNode;
+import com.simibubi.create.content.trains.graph.TrackNodeLocation;
+import com.simibubi.create.content.trains.track.FakeTrackBlock;
 import com.simibubi.create.content.trains.track.ITrackBlock;
-import com.simibubi.create.content.trains.track.TrackBlockEntity;
 import com.simibubi.create.foundation.damageTypes.CreateDamageSources;
 import com.simibubi.create.infrastructure.config.AllConfigs;
 import dev.ryanhcode.sable.Sable;
@@ -34,6 +39,7 @@ import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.SubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.createmod.catnip.data.Couple;
+import net.createmod.catnip.data.Pair;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.Registries;
@@ -51,7 +57,6 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -60,6 +65,8 @@ import org.joml.Quaterniond;
 import org.joml.Quaterniondc;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
+import org.apache.commons.lang3.mutable.MutableBoolean;
+import org.apache.commons.lang3.mutable.MutableInt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.stepan1411.sablenautics.content.entities.SableBogeyEntity;
@@ -75,6 +82,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.function.Consumer;
 
 /**
  * Represents a Create carriage as a Sable sub-level.
@@ -125,6 +133,12 @@ public final class SableTrainController {
     private static final int AUTO_ATTACH_RETRY_TICKS = 10;
     /** Ticks between cheap scans while no track was found under the bogeys yet. */
     private static final int AUTO_ATTACH_SCAN_INTERVAL = 2;
+    /** How far from a bogey the nearest track edge is looked up. */
+    private static final double TRACK_SEARCH_RADIUS = 4.0;
+    /** How many bogies are checked against the graph per attempt. */
+    private static final int MAX_ATTACH_PROBES = 6;
+    /** How many distinct track points are tried before waiting for the next attempt. */
+    private static final int MAX_ATTACH_ATTEMPTS = 8;
     /** Track blocks this close to the edge the train flew off are not grabbed again. */
     private static final double FLY_OFF_GRAB_RADIUS = 2.5;
 
@@ -175,6 +189,8 @@ public final class SableTrainController {
         private long nextAttachAttemptTick;
         /** World position of the track end the train flew off, excluded from auto-attach. */
         private @Nullable Vec3 flyOffAnchor;
+        /** Track edges the train was on when it flew off. It must not latch back onto them. */
+        private @Nullable Set<EdgeKey> flyOffEdges;
         /**
          * Only this carriage may start auto-attaching a fully detached train. After the train
          * flies off the end of a track, the carriages left behind are still over the old rails
@@ -419,11 +435,21 @@ public final class SableTrainController {
      * the last few blocks of track.
      */
     private static void flyOffEndOfTrack(Train train, int blockedIndex, Vec3 anchor, double speed) {
+        Set<EdgeKey> oldEdges = new HashSet<>();
+        train.forEachTravellingPoint(tp -> {
+            if (tp.node1 == null || tp.node2 == null) return;
+            TrackNodeLocation first = tp.node1.getLocation();
+            TrackNodeLocation second = tp.node2.getLocation();
+            oldEdges.add(new EdgeKey(first, second));
+            oldEdges.add(new EdgeKey(second, first));
+        });
+
         int detached = 0;
         for (SubLevelData other : SUBLEVELS.values()) {
             if (!other.trainId().equals(train.id)) continue;
 
             other.flyOffAnchor = anchor;
+            other.flyOffEdges = oldEdges;
             other.autoAttachTrigger = true;
             if (!other.detached) {
                 removeRailJoint(other);
@@ -440,60 +466,169 @@ public final class SableTrainController {
     }
 
     /**
-     * Hooks a train up to the track at {@code trackPos}, wherever it is. Create's relocator
-     * rewrites every travelling point of the train from that spot, so this works for any
-     * track segment, not just the one the train derailed from.
+     * Hooks a train up to the nearest track edge to {@code point}. Works for straight rails and
+     * for bezier curves (the graph edge is used directly, so no track block is required).
      *
-     * @param direction horizontal direction used to pick the right track axis / slope side
+     * @param direction horizontal direction used to align the train along the track
      * @return true when the train now sits on the rails
      */
-    public static boolean relocateToTrack(Train train, ServerLevel level, BlockPos trackPos, Vec3 direction) {
-        if (train == null || level == null || trackPos == null) return false;
-        if (!(level.getBlockState(trackPos).getBlock() instanceof ITrackBlock)) return false;
+    public static boolean relocateToNearestTrack(Train train, ServerLevel level, Vec3 point, Vec3 direction) {
+        if (train == null || level == null || point == null) return false;
+        TrackPoint nearest = findNearestTrackPoint(level, point, TRACK_SEARCH_RADIUS);
+        if (nearest == null) return false;
+        return relocateToTrackPoint(train, level, nearest, direction);
+    }
 
-        if (!TrainRelocator.relocate(train, level, trackPos, null, false, direction, false)) {
-            return false;
-        }
-
-        teleportToRails(train);
-        return true;
+    /** A point on a track graph edge, used for attaching a train to any rail segment. */
+    private record TrackPoint(TrackGraph graph, Couple<TrackNodeLocation> edge, double position, Vec3 worldPos) {
     }
 
     /**
-     * Hooks a train onto a bezier curve segment. Used when the bogeys are over a curved track
-     * piece that doesn't have a simple ITrackBlock at the exact block position.
+     * @return the closest point on any track graph edge within {@code maxDistance} blocks
      */
-    public static boolean relocateToBezier(Train train, ServerLevel level, BlockPos trackBEPos,
-                                           BlockPos curveTarget, int segment, Vec3 direction) {
-        if (train == null || level == null || trackBEPos == null || curveTarget == null) return false;
+    private static @Nullable TrackPoint findNearestTrackPoint(ServerLevel level, Vec3 point, double maxDistance) {
+        double bestDistanceSq = maxDistance * maxDistance;
+        TrackPoint best = null;
 
-        BlockEntity be = level.getBlockEntity(trackBEPos);
-        if (!(be instanceof TrackBlockEntity trackBE)) return false;
+        for (TrackGraph graph : Create.RAILWAYS.trackNetworks.values()) {
+            for (TrackNodeLocation nodeLocation : graph.getNodes()) {
+                if (!level.dimension().equals(nodeLocation.dimension)) continue;
 
-        BezierConnection connection = trackBE.getConnections().get(curveTarget);
-        if (connection == null || !connection.isPrimary()) return false;
+                TrackNode node = graph.locateNode(nodeLocation);
+                if (node == null) continue;
 
-        // Determine bezier direction: whether we're moving from trackBEPos towards curveTarget
-        // or vice versa. Use the horizontal dot product with the curve's start-to-end vector.
-        Vec3 start = connection.starts.getFirst();
-        Vec3 end = connection.starts.getSecond();
-        Vec3 curveDir = new Vec3(end.x - start.x, 0.0, end.z - start.z).normalize();
-        boolean bezierDirection = direction.dot(curveDir) >= 0;
+                for (TrackEdge edge : graph.getConnectionsFrom(node).values()) {
+                    if (edge.node1 != node || edge.isInterDimensional()) continue;
 
-        BezierTrackPointLocation bezierLoc = new BezierTrackPointLocation(curveTarget, segment);
+                    AABB bounds = edge.isTurn()
+                            ? edge.getTurn().getBounds()
+                            : new AABB(edge.node1.getLocation().getLocation(),
+                                    edge.node2.getLocation().getLocation());
+                    if (!bounds.inflate(maxDistance).contains(point)) continue;
 
-        if (!TrainRelocator.relocate(train, level, trackBEPos, bezierLoc, bezierDirection, direction, false)) {
-            return false;
+                    double length = edge.getLength();
+                    if (length <= 1.0e-4) continue;
+
+                    int samples = Math.min(64, Math.max(4, (int) Math.ceil(length)));
+                    for (int i = 0; i <= samples; i++) {
+                        double t = (double) i / samples;
+                        Vec3 sample = edge.getPosition(graph, t);
+                        double distanceSq = sample.distanceToSqr(point);
+                        if (distanceSq >= bestDistanceSq) continue;
+
+                        bestDistanceSq = distanceSq;
+                        best = new TrackPoint(graph,
+                                Couple.create(edge.node1.getLocation(), edge.node2.getLocation()),
+                                t * length, sample);
+                    }
+                }
+            }
         }
+
+        return best;
+    }
+
+    /**
+     * Rewrites every travelling point of the train from {@code candidate} onwards, mirroring
+     * Create's train relocator but without needing a track block at the exact spot.
+     */
+    private static boolean relocateToTrackPoint(Train train, ServerLevel level, TrackPoint candidate,
+                                                Vec3 direction) {
+        TrackGraph graph = candidate.graph();
+        TrackNode node1 = graph.locateNode(candidate.edge().getFirst());
+        TrackNode node2 = graph.locateNode(candidate.edge().getSecond());
+        if (node1 == null || node2 == null) return false;
+
+        TrackEdge edge = graph.getConnectionsFrom(node1).get(node2);
+        if (edge == null) return false;
+
+        double position = candidate.position();
+
+        // The train is laid out backwards from the chosen point, so order the edge along the
+        // direction the carriage is lying in.
+        Vec3 edgeDirection = edge.getPosition(graph, 1).subtract(edge.getPosition(graph, 0));
+        if (direction != null && edgeDirection.lengthSqr() > 1.0e-6 && direction.dot(edgeDirection) < 0) {
+            TrackNode swap = node1;
+            node1 = node2;
+            node2 = swap;
+            edge = graph.getConnectionsFrom(node1).get(node2);
+            if (edge == null) return false;
+            position = edge.getLength() - position;
+        }
+        if (position < 0 || position > edge.getLength()) return false;
+
+        TravellingPoint probe = new TravellingPoint(node1, node2, edge, position, false);
+        IEdgePointListener ignoreSignals = probe.ignoreEdgePoints();
+        ITurnListener ignoreTurns = probe.ignoreTurns();
+        List<Pair<Couple<TrackNode>, Double>> recordedLocations = new ArrayList<>();
+        List<Vec3> recordedVecs = new ArrayList<>();
+        Consumer<TravellingPoint> recorder = tp -> {
+            recordedLocations.add(Pair.of(Couple.create(tp.node1, tp.node2), tp.position));
+            recordedVecs.add(tp.getPosition(graph));
+        };
+        ITrackSelector steer = probe.steer(TravellingPoint.SteerDirection.NONE, edge.getNormal(graph, 0));
+        MutableBoolean blocked = new MutableBoolean(false);
+        MutableBoolean portal = new MutableBoolean(false);
+        MutableInt blockingIndex = new MutableInt(0);
+
+        train.forEachTravellingPointBackwards((tp, d) -> {
+            if (blocked.booleanValue()) return;
+            probe.travel(graph, d, steer, ignoreSignals, ignoreTurns, $ -> {
+                portal.setTrue();
+                return true;
+            });
+            recorder.accept(probe);
+            if (probe.blocked || portal.booleanValue()) {
+                blocked.setTrue();
+                return;
+            }
+            blockingIndex.increment();
+        });
+
+        for (int i = 0; i < recordedVecs.size() - 1; i++) {
+            Vec3 vec1 = recordedVecs.get(i);
+            Vec3 vec2 = recordedVecs.get(i + 1);
+            boolean blocking = i >= blockingIndex.intValue() - 1;
+            boolean collided = !blocked.booleanValue()
+                    && train.findCollidingTrain(level, vec1, vec2, level.dimension()) != null;
+            if (collided || blocking) return false;
+        }
+        if (blocked.booleanValue()) return false;
+
+        train.leaveStation();
+        train.derailed = false;
+        train.navigation.waitingForSignal = null;
+        train.occupiedSignalBlocks.clear();
+        train.graph = graph;
+        train.speed = 0;
+        train.cancelStall();
+        if (train.navigation.destination != null) {
+            train.navigation.cancelNavigation();
+        }
+
+        train.forEachTravellingPoint(tp -> {
+            Pair<Couple<TrackNode>, Double> last = recordedLocations.remove(recordedLocations.size() - 1);
+            tp.node1 = last.getFirst().getFirst();
+            tp.node2 = last.getFirst().getSecond();
+            tp.position = last.getSecond();
+            tp.edge = graph.getConnectionsFrom(tp.node1).get(tp.node2);
+        });
+
+        for (Carriage carriage : train.carriages) {
+            carriage.updateContraptionAnchors();
+        }
+
+        train.status.successfulMigration();
+        train.collectInitiallyOccupiedSignalBlocks();
 
         teleportToRails(train);
         return true;
     }
 
     /**
-     * Snaps a fully detached train onto any rail segment its trigger carriage is lying on,
-     * regardless of how fast the body is moving. A train that is still flying over rails
-     * cannot grab the track end it just left (see {@link #isFlyOffAnchor}).
+     * Snaps a fully detached train onto the nearest track edge, straight or curved, regardless
+     * of how fast the body is moving. The track is looked up from the track graph, so curves
+     * are found even in the middle of a bezier where there is no track block.
      */
     private static boolean tryAttachToNearbyTrack(ServerSubLevel body, ServerLevel level, Train train,
                                                   SubLevelData data) {
@@ -504,13 +639,33 @@ public final class SableTrainController {
         long now = level.getGameTime();
         if (now < data.nextAttachAttemptTick) return false;
 
-        // Collect track candidates from ALL detached carriages of this train
-        List<TrackCandidate> candidates = new ArrayList<>();
+        List<BogieProbe> bogieProbes = new ArrayList<>();
+
         for (SubLevelData other : SUBLEVELS.values()) {
             if (!other.trainId().equals(train.id) || !other.detached) continue;
             ServerSubLevel otherBody = other.subLevel();
             if (otherBody.isRemoved()) continue;
-            candidates.addAll(trackCandidatesForBody(otherBody, level, other));
+
+            Pose3d pose = otherBody.logicalPose();
+            for (BogieInfo bogie : other.bogies()) {
+                Vector3d world = pose.transformPosition(bogie.localPlotCenter(), new Vector3d());
+                bogieProbes.add(new BogieProbe(other, new Vec3(world.x, world.y, world.z)));
+            }
+        }
+
+        // Lay the train out from its rear-most carriage so it extends forward over its own span.
+        bogieProbes.sort(Comparator.comparingInt((BogieProbe probe) -> probe.data().carriageIndex()).reversed());
+
+        List<TrackPoint> candidates = new ArrayList<>();
+        for (BogieProbe probe : bogieProbes) {
+            if (candidates.size() >= MAX_ATTACH_PROBES) break;
+            if (!hasTrackNearby(level, probe.point(), TRACK_SEARCH_RADIUS)) continue;
+
+            TrackPoint candidate = findNearestTrackPoint(level, probe.point(), TRACK_SEARCH_RADIUS);
+            if (candidate == null) continue;
+            if (isFlyOffAnchor(probe.data(), candidate.worldPos())) continue;
+            if (isOnFlyOffEdge(probe.data(), candidate)) continue;
+            candidates.add(candidate);
         }
 
         if (candidates.isEmpty()) {
@@ -518,25 +673,22 @@ public final class SableTrainController {
             return false;
         }
 
-        // Deduplicate and sort by distance to the trigger carriage
-        Vec3 triggerCenter = new Vec3(body.logicalPose().position().x, body.logicalPose().position().y, body.logicalPose().position().z);
-        candidates.sort(Comparator.comparingDouble(c -> c.worldPos.distanceToSqr(triggerCenter)));
-        List<TrackCandidate> unique = new ArrayList<>();
-        for (TrackCandidate c : candidates) {
-            if (unique.stream().noneMatch(u -> u.pos.equals(c.pos) && u.segment == c.segment && (u.curveTarget == null ? c.curveTarget == null : u.curveTarget.equals(c.curveTarget)))) {
-                unique.add(c);
-            }
-        }
-
         Vec3 direction = trackDirection(body, data);
-        for (TrackCandidate candidate : unique) {
-            boolean success;
-            if (candidate.isBezier()) {
-                success = relocateToBezier(train, level, candidate.pos, candidate.curveTarget, candidate.segment, direction);
-            } else {
-                success = relocateToTrack(train, level, candidate.pos, direction);
+        List<TrackPoint> tried = new ArrayList<>();
+        for (TrackPoint candidate : candidates) {
+            if (tried.size() >= MAX_ATTACH_ATTEMPTS) break;
+            boolean duplicate = false;
+            for (TrackPoint previous : tried) {
+                if (sameTrackPoint(previous, candidate)) {
+                    duplicate = true;
+                    break;
+                }
             }
-            if (success) {
+            if (duplicate) continue;
+
+            tried.add(candidate);
+            if (relocateToTrackPoint(train, level, candidate, direction)) {
+                LOGGER.info("Sablenautics: train {} attached to track at {}", train.id, candidate.worldPos());
                 return true;
             }
         }
@@ -546,89 +698,43 @@ public final class SableTrainController {
     }
 
     /**
-     * Finds track candidates for a specific carriage body.
+     * Cheap check before walking the track graph: is there any track block (including the fake
+     * blocks laid along curves) within {@code radius} of {@code point}?
      */
-    private static List<TrackCandidate> trackCandidatesForBody(ServerSubLevel body, ServerLevel level, SubLevelData data) {
-        Pose3d pose = body.logicalPose();
-        List<TrackCandidate> candidates = new ArrayList<>();
+    private static boolean hasTrackNearby(ServerLevel level, Vec3 point, double radius) {
+        BlockPos center = BlockPos.containing(point);
+        int r = (int) Math.ceil(radius);
 
-        for (BogieInfo bogie : data.bogies()) {
-            Vector3d world = pose.transformPosition(bogie.localPlotCenter(), new Vector3d());
-            Vec3 centerVec = new Vec3(world.x, world.y, world.z);
-            BlockPos center = BlockPos.containing(world.x, world.y, world.z);
-
-            // 1. Regular track blocks in a box around the bogey
-            for (BlockPos pos : BlockPos.betweenClosed(center.offset(-1, -3, -1), center.offset(1, 2, 1))) {
-                if (!(level.getBlockState(pos).getBlock() instanceof ITrackBlock)) continue;
-
-                BlockPos immutable = pos.immutable();
-                if (candidates.stream().anyMatch(c -> c.pos.equals(immutable) && !c.isBezier())) continue;
-                // Don't grab the very track end the train just flew off from.
-                if (isFlyOffAnchor(data, immutable)) continue;
-                candidates.add(new TrackCandidate(immutable, -1, centerVec));
-            }
-
-            // 2. Bezier curve connections from nearby TrackBlockEntities
-            for (BlockPos bePos : BlockPos.betweenClosed(center.offset(-2, -2, -2), center.offset(2, 2, 2))) {
-                BlockEntity be = level.getBlockEntity(bePos);
-                if (!(be instanceof TrackBlockEntity trackBE)) continue;
-
-                for (Map.Entry<BlockPos, BezierConnection> entry : trackBE.getConnections().entrySet()) {
-                    BlockPos curveTarget = entry.getKey();
-                    BezierConnection bc = entry.getValue();
-                    if (!bc.isPrimary()) continue;
-
-                    // Check if the bogey is actually near this bezier curve using its bounds
-                    AABB bounds = bc.getBounds();
-                    AABB inflated = bounds.inflate(5.0);
-                    if (!inflated.contains(centerVec)) {
-                        // Fallback: check distance to curve start/end points
-                        Vec3 start = bc.starts.getFirst();
-                        Vec3 end = bc.starts.getSecond();
-                        if (centerVec.distanceTo(start) > 5.0 && centerVec.distanceTo(end) > 5.0) {
-                            continue;
-                        }
-                    }
-
-                    // The curve is stored at the target position; we check if our bogey is near the curve
-                    int maxSegments = bc.getSegmentCount();
-                    for (int seg = 0; seg < maxSegments; seg++) {
-                        int segment = seg; // effectively final for lambda
-                        BlockPos candidatePos = bePos.immutable();
-                        if (candidates.stream().anyMatch(c -> c.pos.equals(candidatePos) && c.curveTarget != null && c.curveTarget.equals(curveTarget) && c.segment == segment)) continue;
-                        if (isFlyOffAnchor(data, candidatePos, curveTarget)) continue;
-                        candidates.add(new TrackCandidate(candidatePos, curveTarget, segment, centerVec));
-                    }
-                }
-            }
+        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-r, -r, -r), center.offset(r, r, r))) {
+            BlockState state = level.getBlockState(pos);
+            if (state.getBlock() instanceof ITrackBlock) return true;
+            if (state.getBlock() instanceof FakeTrackBlock) return true;
         }
-
-        return candidates;
+        return false;
     }
 
-    /**
-     * Represents a track candidate that can be either a regular track block or a bezier curve segment.
-     */
-    private static class TrackCandidate {
-        final BlockPos pos;        // for regular: the track block pos; for bezier: the TrackBlockEntity pos
-        final BlockPos curveTarget; // only for bezier: the target position (other end of curve)
-        final int segment;         // -1 for regular track, >=0 for bezier segment
-        final Vec3 worldPos;       // for sorting by distance
+    private static boolean sameTrackPoint(TrackPoint first, TrackPoint second) {
+        return first.graph() == second.graph()
+                && first.edge().getFirst().equals(second.edge().getFirst())
+                && first.edge().getSecond().equals(second.edge().getSecond())
+                && Math.abs(first.position() - second.position()) < 2.0;
+    }
 
-        TrackCandidate(BlockPos pos, int segment, Vec3 worldPos) {
-            this(pos, null, segment, worldPos);
-        }
+    private record BogieProbe(SubLevelData data, Vec3 point) {
+    }
 
-        TrackCandidate(BlockPos pos, BlockPos curveTarget, int segment, Vec3 worldPos) {
-            this.pos = pos;
-            this.curveTarget = curveTarget;
-            this.segment = segment;
-            this.worldPos = worldPos;
-        }
+    private record EdgeKey(TrackNodeLocation first, TrackNodeLocation second) {
+    }
 
-        boolean isBezier() {
-            return segment >= 0;
-        }
+    private static boolean isOnFlyOffEdge(SubLevelData data, TrackPoint point) {
+        Set<EdgeKey> edges = data.flyOffEdges;
+        if (edges == null) return false;
+        return edges.contains(new EdgeKey(point.edge().getFirst(), point.edge().getSecond()));
+    }
+
+    private static boolean isFlyOffAnchor(SubLevelData data, Vec3 pos) {
+        if (data.flyOffAnchor == null) return false;
+        return pos.distanceToSqr(data.flyOffAnchor) < FLY_OFF_GRAB_RADIUS * FLY_OFF_GRAB_RADIUS;
     }
 
     private static boolean allCarriagesDetached(Train train) {
@@ -639,84 +745,6 @@ public final class SableTrainController {
             if (!other.detached) return false;
         }
         return found;
-    }
-
-    /**
-     * @return track candidates (regular blocks or bezier segments) under the bogeys, nearest first
-     */
-    private static List<TrackCandidate> trackCandidates(ServerSubLevel body, ServerLevel level, SubLevelData data) {
-        Pose3d pose = body.logicalPose();
-        List<TrackCandidate> candidates = new ArrayList<>();
-        List<Vec3> bogieCenters = new ArrayList<>();
-
-        for (BogieInfo bogie : data.bogies()) {
-            Vector3d world = pose.transformPosition(bogie.localPlotCenter(), new Vector3d());
-            Vec3 centerVec = new Vec3(world.x, world.y, world.z);
-            bogieCenters.add(centerVec);
-            BlockPos center = BlockPos.containing(world.x, world.y, world.z);
-
-            // 1. Regular track blocks in a box around the bogey
-            for (BlockPos pos : BlockPos.betweenClosed(center.offset(-1, -3, -1), center.offset(1, 2, 1))) {
-                if (!(level.getBlockState(pos).getBlock() instanceof ITrackBlock)) continue;
-
-                BlockPos immutable = pos.immutable();
-                if (candidates.stream().anyMatch(c -> c.pos.equals(immutable) && !c.isBezier())) continue;
-                // Don't grab the very track end the train just flew off from.
-                if (isFlyOffAnchor(data, immutable)) continue;
-                candidates.add(new TrackCandidate(immutable, -1, Vec3.atCenterOf(immutable)));
-            }
-
-            // 2. Bezier curve connections from nearby TrackBlockEntities
-            for (BlockPos bePos : BlockPos.betweenClosed(center.offset(-2, -2, -2), center.offset(2, 2, 2))) {
-                BlockEntity be = level.getBlockEntity(bePos);
-                if (!(be instanceof TrackBlockEntity trackBE)) continue;
-
-                for (Map.Entry<BlockPos, BezierConnection> entry : trackBE.getConnections().entrySet()) {
-                    BlockPos curveTarget = entry.getKey();
-                    BezierConnection bc = entry.getValue();
-                    if (!bc.isPrimary()) continue;
-
-                    // Check if the bogey is actually near this bezier curve using its bounds
-                    AABB bounds = bc.getBounds();
-                    Vec3 bogeyVec = new Vec3(world.x, world.y, world.z);
-                    AABB inflated = bounds.inflate(3.0);
-                    if (!inflated.contains(bogeyVec)) {
-                        continue;
-                    }
-
-                    // The curve is stored at the target position; we check if our bogey is near the curve
-                    int maxSegments = bc.getSegmentCount();
-                    for (int seg = 0; seg < maxSegments; seg++) {
-                        int segment = seg; // effectively final for lambda
-                        BlockPos candidatePos = bePos.immutable();
-                        if (candidates.stream().anyMatch(c -> c.pos.equals(candidatePos) && c.curveTarget != null && c.curveTarget.equals(curveTarget) && c.segment == segment)) continue;
-                        if (isFlyOffAnchor(data, candidatePos, curveTarget)) continue;
-                        candidates.add(new TrackCandidate(candidatePos, curveTarget, segment, bogeyVec));
-                    }
-                }
-            }
-        }
-
-        if (candidates.isEmpty()) {
-            return candidates;
-        }
-
-        Vec3 reference = bogieCenters.isEmpty() ? candidates.get(0).worldPos : bogieCenters.get(0);
-        candidates.sort(Comparator.comparingDouble(c -> c.worldPos.distanceToSqr(reference)));
-        return candidates.size() > 5 ? new ArrayList<>(candidates.subList(0, 5)) : candidates;
-    }
-
-    private static boolean isFlyOffAnchor(SubLevelData data, BlockPos pos) {
-        if (data.flyOffAnchor == null) return false;
-        return pos.distToCenterSqr(data.flyOffAnchor) < FLY_OFF_GRAB_RADIUS * FLY_OFF_GRAB_RADIUS;
-    }
-
-    private static boolean isFlyOffAnchor(SubLevelData data, BlockPos pos, BlockPos curveTarget) {
-        if (data.flyOffAnchor == null) return false;
-        // Check both the track BE position and the curve target
-        if (pos.distToCenterSqr(data.flyOffAnchor) < FLY_OFF_GRAB_RADIUS * FLY_OFF_GRAB_RADIUS) return true;
-        if (curveTarget != null && curveTarget.distToCenterSqr(data.flyOffAnchor) < FLY_OFF_GRAB_RADIUS * FLY_OFF_GRAB_RADIUS) return true;
-        return false;
     }
 
     /**
@@ -800,6 +828,7 @@ public final class SableTrainController {
     private static void detach(SubLevelData data, Train train, double error) {
         data.flewOff = false;
         data.flyOffAnchor = null;
+        data.flyOffEdges = null;
         data.autoAttachTrigger = true;
         markDetached(data, train);
         LOGGER.warn("Sablenautics: carriage {} of train {} tore off the rails (offset {} blocks)",
@@ -821,6 +850,7 @@ public final class SableTrainController {
         data.detached = false;
         data.flewOff = false;
         data.flyOffAnchor = null;
+        data.flyOffEdges = null;
         data.autoAttachTrigger = true;
         if (data.derailedByDetach) {
             data.derailedByDetach = false;
@@ -1169,6 +1199,7 @@ public final class SableTrainController {
             data.derailedByDetach = false;
             data.flewOff = false;
             data.flyOffAnchor = null;
+            data.flyOffEdges = null;
             data.autoAttachTrigger = true;
             data.initialized = true;
             data.hasTarget = true;

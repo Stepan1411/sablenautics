@@ -55,10 +55,10 @@ public final class SableTrainCommands {
         }
 
         Vec3 direction = lookDirection(source);
-        BlockPos trackPos = findTrack(source, level);
+        Vec3 trackPoint = findTrack(source, level);
 
-        if (trackPos != null) {
-            if (!SableTrainController.relocateToTrack(nearest, level, trackPos, direction)) {
+        if (trackPoint != null) {
+            if (!SableTrainController.relocateToNearestTrack(nearest, level, trackPoint, direction)) {
                 source.sendFailure(Component.literal(
                         "Sablenautics: could not put the train on that track (not enough room or blocked)"));
                 return 0;
@@ -67,7 +67,8 @@ public final class SableTrainCommands {
             Train train = nearest;
             source.sendSuccess(() -> Component.literal(
                     "Sablenautics: put train \"" + train.name.getString() + "\" on the track at "
-                            + trackPos.getX() + " " + trackPos.getY() + " " + trackPos.getZ()), true);
+                            + (int) Math.floor(trackPoint.x) + " " + (int) Math.floor(trackPoint.y)
+                            + " " + (int) Math.floor(trackPoint.z)), true);
             return train.carriages.size();
         }
 
@@ -115,17 +116,14 @@ public final class SableTrainCommands {
     }
 
     /**
-     * @return the track block the executor is looking at, or the closest one around them
+     * @return the exact spot the executor is looking at, or the closest track around them
      */
-    private static @Nullable BlockPos findTrack(CommandSourceStack source, ServerLevel level) {
+    private static @Nullable Vec3 findTrack(CommandSourceStack source, ServerLevel level) {
         Entity entity = source.getEntity();
         if (entity != null) {
             HitResult hit = entity.pick(32.0, 0.0F, false);
             if (hit instanceof BlockHitResult blockHit) {
-                BlockPos pos = blockHit.getBlockPos();
-                if (level.getBlockState(pos).getBlock() instanceof ITrackBlock) {
-                    return pos;
-                }
+                return blockHit.getLocation();
             }
         }
 
@@ -143,7 +141,7 @@ public final class SableTrainCommands {
             best = pos.immutable();
         }
 
-        return best;
+        return best == null ? null : Vec3.atCenterOf(best);
     }
 
     private static int purge(CommandSourceStack source, boolean all) {
