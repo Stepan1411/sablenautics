@@ -235,7 +235,10 @@ public final class SableTrainController {
         if (train == null) return;
         if (data.carriageIndex() < 0 || data.carriageIndex() >= train.carriages.size()) return;
 
-        linkNeighbours(train);
+        if (!LINKED_TRAINS.containsKey(train.id)) {
+            ensureMappings(train);
+            linkNeighbours(train);
+        }
         Carriage carriage = train.carriages.get(data.carriageIndex());
 
         // Create used to refresh anchors in CarriageContraptionEntity#tick. There is no entity now,
@@ -689,10 +692,14 @@ public final class SableTrainController {
             }
         }
 
+        boolean complete = true;
         for (int i = 0; i + 1 < count; i++) {
             SubLevelData first = ordered[i];
             SubLevelData second = ordered[i + 1];
-            if (first == null || second == null) continue;
+            if (first == null || second == null) {
+                complete = false;
+                continue;
+            }
             if (first.nextContactJoint != null && first.nextContactJoint.isValid()) continue;
 
             ServerSubLevel firstBody = first.subLevel();
@@ -715,7 +722,9 @@ public final class SableTrainController {
             }
         }
 
-        LINKED_TRAINS.put(train.id, Boolean.TRUE);
+        if (complete) {
+            LINKED_TRAINS.put(train.id, Boolean.TRUE);
+        }
     }
 
     public static boolean isSableCarriage(Carriage carriage) {
