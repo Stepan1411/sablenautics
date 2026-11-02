@@ -44,14 +44,16 @@ public final class SableTrainControlsEvents {
         SableTrainController.clear();
         SableTrainControlManager.clear();
         SableCarriageRegistry.clear();
+        SableTrainAssembler.clear();
     }
 
     /**
      * Old saves (or other paths) may still contain carriage contraption entities.
-     * They must never enter the world: the sub-level is the carriage.
+     * Only Sable carriages must never enter the world; normal Create carriages are allowed.
      */
     public static void onEntityJoinLevel(EntityJoinLevelEvent event) {
-        if (event.getEntity() instanceof CarriageContraptionEntity) {
+        if (event.getEntity() instanceof CarriageContraptionEntity entity
+                && SableTrainController.isSableCarriage(entity.getCarriage())) {
             event.setCanceled(true);
         }
     }

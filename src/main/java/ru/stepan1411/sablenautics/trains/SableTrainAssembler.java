@@ -27,6 +27,7 @@ import org.joml.Vector3d;
 import org.joml.Vector3dc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
 import ru.stepan1411.sablenautics.mixin.trains.ContraptionAccessor;
 
 import java.util.*;
@@ -41,6 +42,8 @@ public class SableTrainAssembler {
     // Keyed by contraption, filled during phase 1 (assemble), consumed during phase 2 (registerTrain).
     // Insertion order matches Create's carriage order, so it can be used for carriage indexing.
     private static final Map<CarriageContraption, SubLevelData> PENDING_SUBLEVELS = new LinkedHashMap<>();
+    private static final Set<CarriageContraption> SABLE_CONTRAPTIONS =
+            Collections.newSetFromMap(new IdentityHashMap<>());
 
     private static class SubLevelData {
         final ServerSubLevel subLevel;
@@ -64,10 +67,34 @@ public class SableTrainAssembler {
      * Phase 1: Assemble blocks into a Sable sublevel BEFORE they are removed from world.
      * Called from mixin wrapping removeBlocksFromWorld.
      */
+    public static boolean hasPhysicsSticker(CarriageContraption contraption) {
+        Map<BlockPos, StructureBlockInfo> blocks = contraption.getBlocks();
+        if (blocks == null) return false;
+        for (StructureBlockInfo info : blocks.values()) {
+            if (info.state().getBlock() == SablenauticsBlocks.PHYSICS_STICKER.get()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isSable(CarriageContraption contraption) {
+        return contraption != null && SABLE_CONTRAPTIONS.contains(contraption);
+    }
+
+    public static void clear() {
+        PENDING_SUBLEVELS.clear();
+        SABLE_CONTRAPTIONS.clear();
+    }
+
     public static void assemble(CarriageContraption contraption, Level level) {
         LOGGER.debug("Sablenautics: Start Sublevel assembly");
 
         if (!(level instanceof ServerLevel serverLevel)) return;
+        if (!hasPhysicsSticker(contraption)) {
+            LOGGER.debug("Sablenautics: carriage has no physics sticker; keeping it a normal Create carriage");
+            return;
+        }
 
         BlockPos anchor = contraption.anchor;
         Set<BlockPos> globalPosSet = new LinkedHashSet<>();
@@ -171,6 +198,7 @@ public class SableTrainAssembler {
         bogies.sort(Comparator.comparingDouble(info -> info.localPlotCenter().distanceSquared(plotCenter)));
 
         // Store for phase 2 (train registration after train is created)
+        SABLE_CONTRAPTIONS.add(contraption);
         PENDING_SUBLEVELS.put(contraption, new SubLevelData(serverSublevel, contraption, bogies));
         LOGGER.info("Sablenautics: Assembled Sable sublevel {} with {} bogey entity/entities",
                 serverSublevel.getUniqueId(), bogies.size());
@@ -261,12 +289,6 @@ public class SableTrainAssembler {
             SubLevelData data = carriageContraption != null
                     ? PENDING_SUBLEVELS.remove(carriageContraption)
                     : null;
-
-            if (data == null && !PENDING_SUBLEVELS.isEmpty()) {
-                Map.Entry<CarriageContraption, SubLevelData> entry =
-                        PENDING_SUBLEVELS.entrySet().iterator().next();
-                data = PENDING_SUBLEVELS.remove(entry.getKey());
-            }
             if (data == null) continue;
 
             SableTrainController.registerSubLevel(train, data.subLevel, data.contraption,
@@ -289,5 +311,7 @@ public class SableTrainAssembler {
                     PENDING_SUBLEVELS.size());
             PENDING_SUBLEVELS.clear();
         }
+
+        SABLE_CONTRAPTIONS.clear();
     }
 }

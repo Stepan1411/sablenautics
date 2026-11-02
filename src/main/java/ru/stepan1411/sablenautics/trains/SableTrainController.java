@@ -76,10 +76,10 @@ public final class SableTrainController {
 
     /** Distance between the body and the wheel model at which the train tears off. */
     public static final double DETACH_DISTANCE = 3.0;
-    /** Re-attach only when the wheel model is this close to its rail target... */
-    public static final double REATTACH_DISTANCE = 1.0;
-    /** ...and the body is aligned with the track to within this angle. */
-    public static final double REATTACH_ANGLE = Math.toRadians(15.0);
+    /** Re-attach when the body is this close to its rail target... */
+    public static final double REATTACH_DISTANCE = 2.0;
+    /** ...and roughly aligned with the track. Turns need a wider tolerance. */
+    public static final double REATTACH_ANGLE = Math.toRadians(35.0);
 
     // Longitudinal suspension is force based so it can stretch and eventually tear off.
     private static final double LINEAR_STIFFNESS = 120.0;
@@ -546,6 +546,61 @@ public final class SableTrainController {
                 new Quaterniond(bodyPose.orientation()), 0.0f);
     }
 
+    /**
+     * Snaps every Sable carriage of the train back onto its current rail target.
+     *
+     * @return number of carriages that were teleported
+     */
+    public static int teleportToRails(Train train) {
+        if (train == null) return 0;
+        ensureMappings(train);
+
+        int moved = 0;
+        for (int index = 0; index < train.carriages.size(); index++) {
+            Carriage carriage = train.carriages.get(index);
+
+            SubLevelData data = null;
+            for (SubLevelData candidate : SUBLEVELS.values()) {
+                if (candidate.trainId().equals(train.id) && candidate.carriageIndex() == index) {
+                    data = candidate;
+                    break;
+                }
+            }
+            if (data == null) continue;
+
+            ServerSubLevel body = data.subLevel();
+            if (body.isRemoved()) continue;
+
+            ServerLevel level = body.getLevel();
+            carriage.updateContraptionAnchors();
+            DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(level.dimension());
+            if (dce == null || dce.positionAnchor == null) continue;
+
+            SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(level);
+            if (physicsSystem == null) continue;
+            PhysicsPipeline pipeline = physicsSystem.getPipeline();
+
+            Quaterniond orientation = computeTargetOrientation(dce, body.logicalPose(), data.initialYaw());
+            Vector3d targetPosition = computeTargetPosition(body, dce.positionAnchor, orientation);
+
+            teleport(body, targetPosition, orientation, pipeline);
+            ensureRailJoint(data, body, pipeline, targetPosition, orientation);
+
+            data.detached = false;
+            data.derailedByDetach = false;
+            data.initialized = true;
+            data.hasTarget = true;
+            writeDetachedFlag(data);
+            moved++;
+        }
+
+        if (moved > 0) {
+            train.derailed = false;
+            train.speed = 0;
+        }
+        return moved;
+    }
+
     private static void teleport(ServerSubLevel subLevel, Vector3d position, Quaterniond orientation,
                                  PhysicsPipeline pipeline) {
         Pose3d pose = subLevel.logicalPose();
@@ -590,6 +645,22 @@ public final class SableTrainController {
             }
         }
         return null;
+    }
+
+    /**
+     * @return true if this carriage is represented by a Sable sub-level
+     */
+    public static boolean isSableCarriage(Carriage carriage) {
+        if (carriage == null) return false;
+        if (SableCarriageRegistry.get(carriage) != null) return true;
+
+        Train train = carriage.train;
+        if (train == null) return false;
+        int index = train.carriages.indexOf(carriage);
+        if (index < 0) return false;
+
+        ensureMappings(train);
+        return subLevelFor(train, index) != null;
     }
 
     public static boolean isDetached(ServerSubLevel body) {

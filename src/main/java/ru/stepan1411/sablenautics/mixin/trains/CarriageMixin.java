@@ -12,16 +12,21 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import ru.stepan1411.sablenautics.trains.SableCarriageRegistry;
+import ru.stepan1411.sablenautics.trains.SableTrainAssembler;
 
 /**
- * Never create a {@link com.simibubi.create.content.trains.entity.CarriageContraptionEntity}.
- * The carriage is a Sable sub-level; only its assembly data is kept.
+ * For carriages marked with a physics sticker, never create a
+ * {@link com.simibubi.create.content.trains.entity.CarriageContraptionEntity}.
+ * Normal carriages are left completely untouched.
  */
 @Mixin(value = Carriage.class, remap = false)
 public abstract class CarriageMixin {
 
     @Inject(method = "setContraption", at = @At("HEAD"), cancellable = true)
     private void sablenautics$setContraption(Level level, CarriageContraption contraption, CallbackInfo ci) {
+        if (!SableTrainAssembler.isSable(contraption)) {
+            return;
+        }
         SableCarriageRegistry.onContraptionSet((Carriage) (Object) this, level, contraption);
         ci.cancel();
     }
