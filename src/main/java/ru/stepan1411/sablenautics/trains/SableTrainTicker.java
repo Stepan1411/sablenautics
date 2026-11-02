@@ -1,5 +1,7 @@
 package ru.stepan1411.sablenautics.trains;
 
+import com.simibubi.create.Create;
+import com.simibubi.create.content.trains.entity.Train;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.SubLevel;
@@ -11,6 +13,12 @@ import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.tick.ServerTickEvent.Post;
 import ru.stepan1411.sablenautics.Sablenautics;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
 /**
  * Ticks every Sable train sub-level on every server tick, even when its chunks are
  * unloaded. Without this, a train stops moving the moment its chunks unload because
@@ -19,20 +27,30 @@ import ru.stepan1411.sablenautics.Sablenautics;
  * the train's navigation in unloaded chunks, advancing its travelling points, but the
  * Sable sub-level bodies would lag behind and detach on reload.
  * <p>
- * This replaces the {@link ru.stepan1411.sablenautics.mixin.trains.SubLevelMixin} hook on
- * {@code SubLevel#tick()} so each sub-level is ticked exactly once per tick regardless of
- * chunk loading state.
+ * Additionally, this loads chunks around moving trains so they can travel through
+ * unloaded areas, and stops loading them 30 seconds after the train stops so chunks
+ * can unload naturally.
  */
 @EventBusSubscriber(modid = Sablenautics.MOD_ID, bus = EventBusSubscriber.Bus.GAME)
 public class SableTrainTicker {
 
     private static final String TRAIN_KEY = "sablenautics_train";
 
+    /** Chunk radius around the train to load while moving. */
+    private static final int LOAD_RADIUS = 3;
+    /** Ticks after which chunk loading stops when the train is stationary (30 seconds). */
+    private static final int UNLOAD_AFTER_TICKS = 30 * 20;
+
+    /** Last game tick each train was observed moving (non-zero speed). */
+    private static final Map<UUID, Long> LAST_MOVE_TICK = new HashMap<>();
+
     @SubscribeEvent
     public static void onServerTick(Post event) {
         MinecraftServer server = event.getServer();
         if (server == null)
             return;
+
+        long now = server.getTickCount();
 
         for (ServerLevel level : server.getAllLevels()) {
             SubLevelContainer container = SubLevelContainer.getContainer(level);
@@ -52,5 +70,57 @@ public class SableTrainTicker {
                 SableTrainController.tickSubLevel(subLevel, level);
             }
         }
+
+        // Handle chunk loading for trains
+        for (Train train : Create.RAILWAYS.trains.values()) {
+            updateTrainChunkLoading(server, train, now);
+        }
+
+        // Clean up trains that no longer exist
+        LAST_MOVE_TICK.keySet().removeIf(uuid -> !Create.RAILWAYS.trains.containsKey(uuid));
+    }
+
+    /**
+     * Loads chunks around a moving train so it can travel through unloaded areas.
+     * Releases chunks 30 seconds after the train stops.
+     */
+    private static void updateTrainChunkLoading(MinecraftServer server, Train train, long now) {
+        UUID trainId = train.id;
+        boolean moving = Math.abs(train.speed) > 0.001;
+
+        if (moving) {
+            LAST_MOVE_TICK.put(trainId, now);
+            loadChunksAroundTrain(server, train);
+        } else {
+            Long lastMove = LAST_MOVE_TICK.get(trainId);
+            if (lastMove != null && now - lastMove > UNLOAD_AFTER_TICKS) {
+                LAST_MOVE_TICK.remove(trainId);
+            }
+        }
+    }
+
+    /**
+     * Loads chunks around the train's current position so it can travel through
+     * unloaded areas without detaching.
+     */
+    private static void loadChunksAroundTrain(MinecraftServer server, Train train) {
+        var subLevel = SableTrainController.subLevelFor(train, 0);
+        if (subLevel == null || subLevel.isRemoved())
+            return;
+
+        ServerLevel level = subLevel.getLevel();
+        var pose = subLevel.logicalPose();
+        int cx = chunkCoord((int) pose.position().x());
+        int cz = chunkCoord((int) pose.position().z());
+
+        for (int dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; dx++) {
+            for (int dz = -LOAD_RADIUS; dz <= LOAD_RADIUS; dz++) {
+                level.getChunk(cx + dx, cz + dz);
+            }
+        }
+    }
+
+    private static int chunkCoord(int blockCoord) {
+        return blockCoord >> 4;
     }
 }
