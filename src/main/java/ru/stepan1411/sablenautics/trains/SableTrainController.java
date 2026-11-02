@@ -596,7 +596,7 @@ public final class SableTrainController {
                 // it turns relative to the carriage. Apply the same relative yaw/pitch that
                 // CarriageContraptionEntityRenderer.translateBogey uses for normal trains.
                 Quaterniond bogieOrientation = new Quaterniond(targetOrientation);
-                applyBogieAngles(bogieOrientation, carriageBogey(carriage, bogieIndex), train);
+                applyBogieAngles(bogieOrientation, carriageBogey(carriage, bogieIndex), train, dce);
 
                 float angleDelta = (float) (360.0 * train.speed / (Math.PI * 2.0 * info.wheelRadius()));
                 return new BogieTarget(new Vec3(world.x, world.y, world.z), bogieOrientation, angleDelta);
@@ -616,31 +616,46 @@ public final class SableTrainController {
     }
 
     /**
-     * Adds the bogey's own yaw/pitch relative to the carriage, matching
-     * {@code CarriageBogey#updateAngles} and
-     * {@code CarriageContraptionEntityRenderer#translateBogey}.
+     * Adds the bogey's own yaw/pitch relative to the carriage. The carriage already has
+     * its chord orientation, so applying the bogey's absolute heading would double the
+     * turn; only the difference between the bogey points and the rotation anchors is used.
      */
-    private static void applyBogieAngles(Quaterniond orientation, @Nullable CarriageBogey bogey, Train train) {
+    private static void applyBogieAngles(Quaterniond orientation, @Nullable CarriageBogey bogey,
+                                         Train train, DimensionalCarriageEntity dce) {
         if (bogey == null || train.graph == null) return;
+        if (dce.rotationAnchors.either(Objects::isNull)) return;
 
         var leading = bogey.leading();
         var trailing = bogey.trailing();
         if (leading.edge == null || trailing.edge == null) return;
 
-        Vec3 first = leading.getPosition(train.graph);
-        Vec3 second = trailing.getPosition(train.graph);
-        double diffX = first.x - second.x;
-        double diffY = first.y - second.y;
-        double diffZ = first.z - second.z;
-        double horizontal = Math.sqrt(diffX * diffX + diffZ * diffZ);
-        if (horizontal < 1.0e-6 && Math.abs(diffY) < 1.0e-6) return;
+        Vec3 bogeyFirst = leading.getPosition(train.graph);
+        Vec3 bogeySecond = trailing.getPosition(train.graph);
+        Vec3 carriageFirst = dce.rotationAnchors.getFirst();
+        Vec3 carriageSecond = dce.rotationAnchors.getSecond();
 
-        double yaw = Math.atan2(diffZ, diffX) * 180.0 / Math.PI + 90.0;
-        double pitch = Math.atan2(diffY, horizontal) * 180.0 / Math.PI;
+        double bogeyDiffX = bogeyFirst.x - bogeySecond.x;
+        double bogeyDiffY = bogeyFirst.y - bogeySecond.y;
+        double bogeyDiffZ = bogeyFirst.z - bogeySecond.z;
+        double carriageDiffX = carriageFirst.x - carriageSecond.x;
+        double carriageDiffY = carriageFirst.y - carriageSecond.y;
+        double carriageDiffZ = carriageFirst.z - carriageSecond.z;
+
+        double bogeyHorizontal = Math.sqrt(bogeyDiffX * bogeyDiffX + bogeyDiffZ * bogeyDiffZ);
+        double carriageHorizontal = Math.sqrt(carriageDiffX * carriageDiffX + carriageDiffZ * carriageDiffZ);
+        if (bogeyHorizontal < 1.0e-6 || carriageHorizontal < 1.0e-6) return;
+
+        double bogeyYaw = Math.atan2(bogeyDiffZ, bogeyDiffX) * 180.0 / Math.PI;
+        double carriageYaw = Math.atan2(carriageDiffZ, carriageDiffX) * 180.0 / Math.PI;
+        double bogeyPitch = Math.atan2(bogeyDiffY, bogeyHorizontal) * 180.0 / Math.PI;
+        double carriagePitch = Math.atan2(carriageDiffY, carriageHorizontal) * 180.0 / Math.PI;
+
+        double deltaYaw = bogeyYaw - carriageYaw;
+        double deltaPitch = bogeyPitch - carriagePitch;
 
         orientation.mul(new Quaterniond()
-                .rotateY(Math.toRadians(-yaw))
-                .rotateX(Math.toRadians(pitch)));
+                .rotateY(Math.toRadians(-deltaYaw))
+                .rotateZ(Math.toRadians(-deltaPitch)));
     }
 
     /**
