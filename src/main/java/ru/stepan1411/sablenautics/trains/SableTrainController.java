@@ -115,7 +115,11 @@ public final class SableTrainController {
     private static final String FLY_OFF_ANCHOR_X_KEY = "sablenautics_fly_off_anchor_x";
     private static final String FLY_OFF_ANCHOR_Y_KEY = "sablenautics_fly_off_anchor_y";
     private static final String FLY_OFF_ANCHOR_Z_KEY = "sablenautics_fly_off_anchor_z";
-    private static final String ATTACH_STARTED_TICK_KEY = "sablenautics_attach_started_tick";
+    private static final String APPROACH_START_TICK_KEY = "sablenautics_approach_start_tick";
+    private static final String APPROACH_TARGET_X_KEY = "sablenautics_approach_target_x";
+    private static final String APPROACH_TARGET_Y_KEY = "sablenautics_approach_target_y";
+    private static final String APPROACH_TARGET_Z_KEY = "sablenautics_approach_target_z";
+    private static final String APPROACH_TARGET_YAW_KEY = "sablenautics_approach_target_yaw";
     private static final String BOGIES_KEY = "sablenautics_bogies";
     private static final String RUN_OVER_KEY = "sablenautics_last_run_over";
     private static final int RUN_OVER_COOLDOWN = 10;
@@ -144,6 +148,12 @@ public final class SableTrainController {
     private static final int ATTACH_DELAY_TICKS = 60;
     /** Track blocks this close to the edge the train flew off are not grabbed again. */
     private static final double FLY_OFF_GRAB_RADIUS = 2.5;
+    /** Ticks over which a detached body is pulled onto the target track instead of teleporting. */
+    private static final int APPROACH_DURATION_TICKS = 20;
+    /** Max acceleration applied while approaching the target track (blocks per tick^2). */
+    private static final double APPROACH_MAX_ACCELERATION = 15.0;
+    /** How close (blocks) the body must be to the target before snapping onto the rail joint. */
+    private static final double APPROACH_SNAP_DISTANCE = 0.35;
 
     // Longitudinal suspension is force based so it can stretch and eventually tear off.
     private static final double LINEAR_STIFFNESS = 90.0;
@@ -194,10 +204,12 @@ public final class SableTrainController {
         private @Nullable Vec3 flyOffAnchor;
         /** Track edges the train was on when it flew off. It must not latch back onto them. */
         private @Nullable Set<EdgeKey> flyOffEdges;
-        /** Tick at which the auto-attach countdown started; -1 if not counting down. */
-        private long attachStartedTick = -1L;
-        /** The track point the train will snap to after the countdown finishes. */
-        private @Nullable TrackPoint attachCandidate;
+        /** Target position the detached body is being pulled towards during approach. */
+        private @Nullable Vector3d approachTargetPosition;
+        /** Target orientation the detached body is being rotated towards during approach. */
+        private @Nullable Quaterniond approachTargetOrientation;
+        /** Tick when the approach to the target started. */
+        private long approachStartTick = -1L;
         /**
          * Only this carriage may start auto-attaching a fully detached train. After the train
          * flies off the end of a track, the carriages left behind are still over the old rails
@@ -637,9 +649,9 @@ public final class SableTrainController {
      * of how fast the body is moving. The track is looked up from the track graph, so curves
      * are found even in the middle of a bezier where there is no track block.
      * <p>
-     * Attachment is not instant: once a suitable track is found the train waits
-     * {@link #ATTACH_DELAY_TICKS} ticks before snapping, so a train landing on a ramp does not
-     * teleport onto rails the very tick it touches them.
+     * Attachment is not instant teleport: once a suitable track is found the body is pulled
+     * towards it by physics over {@link #APPROACH_DURATION_TICKS} ticks, so the carriage and
+     * its wheels roll onto the rails smoothly instead of snapping.
      */
     private static boolean tryAttachToNearbyTrack(ServerSubLevel body, ServerLevel level, Train train,
                                                   SubLevelData data) {
@@ -647,28 +659,10 @@ public final class SableTrainController {
         if (!data.autoAttachTrigger) return false;
         if (!allCarriagesDetached(train)) return false;
 
+        // Already approaching a track: keep pulling until we reach it.
+        if (data.approachTargetPosition != null) return false;
+
         long now = level.getGameTime();
-
-        // A countdown is already running: wait until it finishes before snapping.
-        if (data.attachStartedTick != -1L) {
-            if (now - data.attachStartedTick < ATTACH_DELAY_TICKS) return false;
-            TrackPoint candidate = data.attachCandidate;
-            data.attachStartedTick = -1L;
-            data.attachCandidate = null;
-            writeDetachedFlag(data);
-            if (candidate == null) return false;
-            Vec3 direction = trackDirection(body, data);
-            if (relocateToTrackPoint(train, level, candidate, direction)) {
-                Vector3dc pos = body.logicalPose().position();
-                level.playSound(null, new BlockPos((int) pos.x(), (int) pos.y(), (int) pos.z()),
-                        SoundEvents.MINECART_RIDING, SoundSource.NEUTRAL, 0.7f, 1.0f);
-                LOGGER.info("Sablenautics: train {} attached to track at {}", train.id, candidate.worldPos());
-                return true;
-            }
-            return false;
-        }
-
-        // Not counting down yet: find a suitable track point and start the countdown.
         if (now < data.nextAttachAttemptTick) return false;
 
         List<BogieProbe> bogieProbes = new ArrayList<>();
@@ -721,27 +715,35 @@ public final class SableTrainController {
         }
 
         if (unique.isEmpty()) {
-            // If we were counting down but lost the track candidate, abort the countdown.
-            if (data.attachStartedTick != -1L) {
-                data.attachStartedTick = -1L;
-                data.attachCandidate = null;
-                writeDetachedFlag(data);
-            }
             data.nextAttachAttemptTick = now + AUTO_ATTACH_SCAN_INTERVAL;
             return false;
         }
 
         TrackPoint chosen = unique.get(0);
-        data.attachStartedTick = now;
-        data.attachCandidate = chosen;
+        Vec3 targetPos = chosen.worldPos();
+        data.approachTargetPosition = new Vector3d(targetPos.x, targetPos.y, targetPos.z());
+
+        // Target orientation: align the carriage along the track edge direction.
+        data.approachTargetOrientation = new Quaterniond();
+        TrackGraph graph = chosen.graph();
+        TrackNode node1 = graph.locateNode(chosen.edge().getFirst());
+        TrackNode node2 = graph.locateNode(chosen.edge().getSecond());
+        if (node1 != null && node2 != null) {
+            TrackEdge edge = graph.getConnectionsFrom(node1).get(node2);
+            if (edge != null) {
+                Vec3 dir = edge.getDirection(true);
+                data.approachTargetOrientation = new Quaterniond()
+                        .rotateY((float) Math.atan2(dir.z, dir.x));
+            }
+        }
+        data.approachStartTick = now;
         writeDetachedFlag(data);
 
-        // Play a warning sound so the player knows the train is about to snap onto rails.
+        // Play a warning sound so the player knows the train is about to be pulled onto rails.
         Vector3dc pos = body.logicalPose().position();
         level.playSound(null, new BlockPos((int) pos.x(), (int) pos.y(), (int) pos.z()),
                 SoundEvents.ARMOR_STAND_PLACE, SoundSource.NEUTRAL, 0.6f, 1.2f);
-        LOGGER.info("Sablenautics: train {} will attach to track at {} in {} ticks",
-                train.id, chosen.worldPos(), ATTACH_DELAY_TICKS);
+        LOGGER.info("Sablenautics: train {} approaching track at {}", train.id, chosen.worldPos());
         return false;
     }
 
@@ -835,6 +837,13 @@ public final class SableTrainController {
     public static void prePhysicsTick(ServerSubLevel subLevel, RigidBodyHandle handle, double timeStep) {
         SubLevelData data = SUBLEVELS.get(subLevel.getUniqueId());
         if (data == null || data.subLevel() != subLevel) return;
+
+        // While approaching the target track, pull the body with physics instead of teleporting.
+        if (data.approachTargetPosition != null) {
+            applyApproach(subLevel, handle, data, timeStep);
+            return;
+        }
+
         if (data.detached || !data.hasTarget) return;
 
         applySuspension(subLevel, handle, data, timeStep);
@@ -885,8 +894,9 @@ public final class SableTrainController {
         data.flyOffAnchor = null;
         data.flyOffEdges = null;
         data.autoAttachTrigger = true;
-        data.attachStartedTick = -1L;
-        data.attachCandidate = null;
+        data.approachStartTick = -1L;
+        data.approachTargetPosition = null;
+        data.approachTargetOrientation = null;
         markDetached(data, train);
         LOGGER.warn("Sablenautics: carriage {} of train {} tore off the rails (offset {} blocks)",
                 data.carriageIndex(), train.id, String.format("%.2f", error));
@@ -909,8 +919,9 @@ public final class SableTrainController {
         data.flyOffAnchor = null;
         data.flyOffEdges = null;
         data.autoAttachTrigger = true;
-        data.attachStartedTick = -1L;
-        data.attachCandidate = null;
+        data.approachStartTick = -1L;
+        data.approachTargetPosition = null;
+        data.approachTargetOrientation = null;
         if (data.derailedByDetach) {
             data.derailedByDetach = false;
             train.derailed = false;
@@ -1260,8 +1271,9 @@ public final class SableTrainController {
             data.flyOffAnchor = null;
             data.flyOffEdges = null;
             data.autoAttachTrigger = true;
-            data.attachStartedTick = -1L;
-            data.attachCandidate = null;
+            data.approachStartTick = -1L;
+            data.approachTargetPosition = null;
+            data.approachTargetOrientation = null;
             data.initialized = true;
             data.hasTarget = true;
             resetTargetTracking(data, targetPosition, orientation, level);
@@ -1308,6 +1320,100 @@ public final class SableTrainController {
         data.lastTargetPosition.set(targetPosition);
         data.lastTargetOrientation.set(targetOrientation);
         data.lastTargetTick = level.getGameTime();
+    }
+
+    /**
+     * Pulls a detached carriage body towards {@link SubLevelData#approachTargetPosition} using
+     * a spring-like force. When the body gets close enough, it is snapped onto the rail joint
+     * and marked as attached again — no teleport, the body (and its wheels / passengers)
+     * arrive by physics.
+     */
+    private static void applyApproach(ServerSubLevel subLevel, RigidBodyHandle handle,
+                                      SubLevelData data, double timeStep) {
+        double mass = subLevel.getMassTracker().getMass();
+        if (mass <= 0) return;
+
+        Vector3dc currentPos = subLevel.logicalPose().position();
+        Vector3d diff = new Vector3d(data.approachTargetPosition).sub(currentPos);
+        double dist = diff.length();
+
+        // Close enough: snap onto the rail joint and stop the approach.
+        if (dist <= APPROACH_SNAP_DISTANCE) {
+            finishApproach(subLevel, handle, data);
+            return;
+        }
+
+        // Spring + damping towards the target.
+        Vector3d velocity = handle.getLinearVelocity(new Vector3d());
+        Vector3d impulse = new Vector3d(diff).mul(APPROACH_MAX_ACCELERATION)
+                .sub(new Vector3d(velocity).mul(4.0));
+        clampLength(impulse, APPROACH_MAX_ACCELERATION);
+
+        double dt = Math.max(timeStep, 1.0 / 20.0 / 8.0);
+        handle.applyLinearAndAngularImpulse(impulse.mul(mass * dt), new Vector3d(), true);
+
+        // Slowly rotate the body towards the target orientation.
+        if (data.approachTargetOrientation != null) {
+            Quaterniond current = new Quaterniond(subLevel.logicalPose().orientation());
+            Quaterniond target = new Quaterniond(data.approachTargetOrientation);
+            Quaterniond delta = new Quaterniond(target).mul(new Quaterniond(current).conjugate()).normalize();
+            double angle = 2.0 * Math.acos(Math.min(1.0, Math.abs(delta.w)));
+            if (angle > 0.02) {
+                Vector3d axis = new Vector3d(delta.x, delta.y, delta.z).normalize();
+                double turnSpeed = Math.min(angle, 0.15);
+                handle.applyLinearAndAngularImpulse(new Vector3d(),
+                        new Vector3d(axis.x * turnSpeed, axis.y * turnSpeed, axis.z * turnSpeed), true);
+            }
+        }
+    }
+
+    /**
+     * Completes the approach: attaches the rail joint, marks the carriage attached and lets
+     * neighbours collide again.
+     */
+    private static void finishApproach(ServerSubLevel subLevel, RigidBodyHandle handle,
+                                       SubLevelData data) {
+        Train train = Create.RAILWAYS.trains.get(data.trainId());
+        if (train == null) {
+            data.approachTargetPosition = null;
+            data.approachTargetOrientation = null;
+            data.approachStartTick = -1L;
+            writeDetachedFlag(data);
+            return;
+        }
+
+        ServerLevel level = subLevel.getLevel();
+        SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(level);
+        PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
+
+        Vector3d targetPos = data.approachTargetPosition;
+        Quaterniond targetOrient = data.approachTargetOrientation != null
+                ? new Quaterniond(data.approachTargetOrientation)
+                : new Quaterniond(subLevel.logicalPose().orientation());
+
+        // Stop residual velocity so the carriage lands neatly on the rails.
+        handle.applyLinearAndAngularImpulse(new Vector3d(), new Vector3d(), true);
+
+        if (pipeline != null) {
+            ensureRailJoint(data, subLevel, pipeline, targetPos, targetOrient);
+            pipeline.wakeUp(subLevel);
+        }
+
+        data.approachTargetPosition = null;
+        data.approachTargetOrientation = null;
+        data.approachStartTick = -1L;
+        data.detached = false;
+        data.flewOff = false;
+        data.initialized = true;
+        data.hasTarget = true;
+        train.derailed = false;
+        linkNeighbours(train);
+        writeDetachedFlag(data);
+
+        Vector3dc finalPos = subLevel.logicalPose().position();
+        level.playSound(null, new BlockPos((int) finalPos.x(), (int) finalPos.y(), (int) finalPos.z()),
+                SoundEvents.MINECART_RIDING, SoundSource.NEUTRAL, 0.7f, 1.0f);
+        LOGGER.info("Sablenautics: train {} smoothly attached to track", train.id);
     }
 
     private static void clampLength(Vector3d vector, double maxLength) {
@@ -1770,10 +1876,19 @@ public final class SableTrainController {
         data.detached = userData.getBoolean(DETACHED_KEY);
         data.flewOff = userData.getBoolean(FLEW_OFF_KEY);
         data.autoAttachTrigger = !userData.contains(AUTO_ATTACH_KEY) || userData.getBoolean(AUTO_ATTACH_KEY);
-        data.attachStartedTick = userData.getLong(ATTACH_STARTED_TICK_KEY);
-        // Do not restore the attach candidate (complex object); start fresh after a reload.
-        data.attachCandidate = null;
-        if (data.attachStartedTick == 0L) data.attachStartedTick = -1L;
+        data.approachStartTick = userData.getLong(APPROACH_START_TICK_KEY);
+        if (data.approachStartTick == 0L) data.approachStartTick = -1L;
+        if (userData.contains(APPROACH_TARGET_X_KEY)) {
+            data.approachTargetPosition = new Vector3d(
+                    userData.getDouble(APPROACH_TARGET_X_KEY),
+                    userData.getDouble(APPROACH_TARGET_Y_KEY),
+                    userData.getDouble(APPROACH_TARGET_Z_KEY));
+            float yaw = userData.getFloat(APPROACH_TARGET_YAW_KEY);
+            data.approachTargetOrientation = new Quaterniond().rotateY(yaw);
+        } else {
+            data.approachTargetPosition = null;
+            data.approachTargetOrientation = null;
+        }
         if (userData.contains(FLY_OFF_ANCHOR_X_KEY)) {
             data.flyOffAnchor = new Vec3(userData.getDouble(FLY_OFF_ANCHOR_X_KEY),
                     userData.getDouble(FLY_OFF_ANCHOR_Y_KEY),
@@ -1794,10 +1909,27 @@ public final class SableTrainController {
         bodyData.putBoolean(DETACHED_KEY, data.detached);
         bodyData.putBoolean(FLEW_OFF_KEY, data.flewOff);
         bodyData.putBoolean(AUTO_ATTACH_KEY, data.autoAttachTrigger);
-        if (data.attachStartedTick != -1L) {
-            bodyData.putLong(ATTACH_STARTED_TICK_KEY, data.attachStartedTick);
+        if (data.approachStartTick != -1L) {
+            bodyData.putLong(APPROACH_START_TICK_KEY, data.approachStartTick);
         } else {
-            bodyData.remove(ATTACH_STARTED_TICK_KEY);
+            bodyData.remove(APPROACH_START_TICK_KEY);
+        }
+        if (data.approachTargetPosition != null) {
+            bodyData.putDouble(APPROACH_TARGET_X_KEY, data.approachTargetPosition.x);
+            bodyData.putDouble(APPROACH_TARGET_Y_KEY, data.approachTargetPosition.y);
+            bodyData.putDouble(APPROACH_TARGET_Z_KEY, data.approachTargetPosition.z);
+        } else {
+            bodyData.remove(APPROACH_TARGET_X_KEY);
+            bodyData.remove(APPROACH_TARGET_Y_KEY);
+            bodyData.remove(APPROACH_TARGET_Z_KEY);
+        }
+        if (data.approachTargetOrientation != null) {
+            Quaterniond q = data.approachTargetOrientation;
+            double sinY = 2.0 * (q.w * q.y + q.x * q.z);
+            double cosY = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+            bodyData.putFloat(APPROACH_TARGET_YAW_KEY, (float) Math.atan2(sinY, cosY));
+        } else {
+            bodyData.remove(APPROACH_TARGET_YAW_KEY);
         }
 
         Vec3 anchor = data.flyOffAnchor;
