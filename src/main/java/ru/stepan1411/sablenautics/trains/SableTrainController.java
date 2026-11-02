@@ -381,7 +381,9 @@ public final class SableTrainController {
 
         // Create stops the whole train when one of its travelling points runs out of track.
         // A Sable train that is still moving keeps its momentum instead and leaves the rails.
-        if (!data.detached && data.initialized) {
+        // But if chunks are unloaded, travelling points may appear blocked even though the
+        // track is fine — don't derail in that case.
+        if (!data.detached && data.initialized && level.hasChunk(chunkCoord((int) dce.positionAnchor.x), chunkCoord((int) dce.positionAnchor.z))) {
             double endOfTrackSpeed = endOfTrackSpeed(serverSubLevel, train, data, carriage);
             if (endOfTrackSpeed > 0) {
                 flyOffEndOfTrack(train, data.carriageIndex(), dce.positionAnchor, endOfTrackSpeed);
@@ -425,8 +427,8 @@ public final class SableTrainController {
             } else if (pipeline != null) {
                 ensureRailJoint(data, serverSubLevel, pipeline, targetPosition, targetOrientation);
             } else {
-                // No physics pipeline (chunks unloaded): move body towards target using spring.
-                moveTowardsTarget(serverSubLevel, data, targetPosition, targetOrientation);
+                // No physics pipeline (chunks unloaded): don't move the body —
+                // just keep the current pose and wait for chunks to load.
             }
         } else {
             boolean snappedBack = false;
@@ -917,9 +919,16 @@ public final class SableTrainController {
         SubLevelData data = SUBLEVELS.get(subLevel.getUniqueId());
         if (data == null || data.subLevel() != subLevel) return;
 
+        ServerLevel level = subLevel.getLevel();
+        if (level == null) return;
+
         // While approaching the target track, pull the body with physics instead of teleporting.
+        // Don't move the body when chunks are unloaded — physics doesn't run there.
         if (data.approachTargetPosition != null) {
-            applyApproach(subLevel, handle, data, timeStep);
+            Vector3dc pos = subLevel.logicalPose().position();
+            if (level.hasChunk(chunkCoord((int) pos.x()), chunkCoord((int) pos.z()))) {
+                applyApproach(subLevel, handle, data, timeStep);
+            }
             return;
         }
 
@@ -1493,6 +1502,10 @@ public final class SableTrainController {
         level.playSound(null, new BlockPos((int) finalPos.x(), (int) finalPos.y(), (int) finalPos.z()),
                 SoundEvents.MINECART_RIDING, SoundSource.NEUTRAL, 0.7f, 1.0f);
         LOGGER.info("Sablenautics: train {} smoothly attached to track", train.id);
+    }
+
+    private static int chunkCoord(int blockCoord) {
+        return blockCoord >> 4;
     }
 
     private static void clampLength(Vector3d vector, double maxLength) {
