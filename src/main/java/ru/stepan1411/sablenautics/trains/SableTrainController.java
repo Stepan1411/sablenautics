@@ -225,6 +225,10 @@ public final class SableTrainController {
         private final Vector3d lastTargetPosition = new Vector3d();
         private final Quaterniond lastTargetOrientation = new Quaterniond();
         private long lastTargetTick;
+        /** Body linear velocity when no physics pipeline is available (chunks unloaded). */
+        private final Vector3d bodyVelocity = new Vector3d();
+        /** Body angular velocity when no physics pipeline is available (chunks unloaded). */
+        private final Vector3d bodyAngularVelocity = new Vector3d();
 
         /** Body <-> rail-target orientation joint, active while the train is on the rails. */
         private @Nullable GenericConstraintHandle railJoint;
@@ -368,8 +372,12 @@ public final class SableTrainController {
         // so refresh them from the travelling points here.
         carriage.updateContraptionAnchors();
 
+        // Ensure a DimensionalCarriageEntity exists so anchors can be read from travelling points.
         DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(level.dimension());
-        if (dce == null || dce.positionAnchor == null) return;
+        if (dce == null) {
+            dce = carriage.getDimensional(level.dimension());
+        }
+        if (dce.positionAnchor == null) return;
 
         // Create stops the whole train when one of its travelling points runs out of track.
         // A Sable train that is still moving keeps its momentum instead and leaves the rails.
@@ -394,9 +402,14 @@ public final class SableTrainController {
         // Align the freshly assembled / freshly loaded carriage once.
         if (!data.initialized) {
             if (!data.detached) {
-                if (pipeline == null) return;
-                teleport(serverSubLevel, targetPosition, targetOrientation, pipeline);
-                ensureRailJoint(data, serverSubLevel, pipeline, targetPosition, targetOrientation);
+                if (pipeline != null) {
+                    teleport(serverSubLevel, targetPosition, targetOrientation, pipeline);
+                    ensureRailJoint(data, serverSubLevel, pipeline, targetPosition, targetOrientation);
+                } else {
+                    // No physics pipeline (chunks unloaded): set pose directly.
+                    pose.position().set(targetPosition);
+                    pose.orientation().set(targetOrientation);
+                }
             }
             data.initialized = true;
             data.hasTarget = true;
@@ -409,8 +422,11 @@ public final class SableTrainController {
             if (bodyError > DETACH_DISTANCE) {
                 removeRailJoint(data);
                 detach(data, train, bodyError);
-            } else {
+            } else if (pipeline != null) {
                 ensureRailJoint(data, serverSubLevel, pipeline, targetPosition, targetOrientation);
+            } else {
+                // No physics pipeline (chunks unloaded): move body towards target using spring.
+                moveTowardsTarget(serverSubLevel, data, targetPosition, targetOrientation);
             }
         } else {
             boolean snappedBack = false;
@@ -482,6 +498,69 @@ public final class SableTrainController {
 
         LOGGER.warn("Sablenautics: train {} ran off the end of the track at carriage {} ({} blocks/s), detached {} carriages",
                 train.id, blockedIndex, String.format("%.2f", speed), detached);
+    }
+
+    /**
+     * Moves the carriage body towards {@code targetPosition} using a spring-damper model,
+     * without requiring a physics pipeline. Used when chunks are unloaded and
+     * {@link #applySuspension} cannot run. The body position and velocity are updated
+     * directly on the sub-level pose.
+     */
+    private static void moveTowardsTarget(ServerSubLevel subLevel, SubLevelData data,
+                                          Vector3d targetPosition, Quaterniond targetOrientation) {
+        double mass = subLevel.getMassTracker().getMass();
+        if (mass <= 0) return;
+
+        Pose3d pose = subLevel.logicalPose();
+        Vector3d currentPos = new Vector3d(pose.position());
+        Vector3d diff = new Vector3d(targetPosition).sub(currentPos);
+        double dist = diff.length();
+
+        if (dist < 0.01) return;
+
+        double massFactor = Math.max(0.6, Math.min(2.0, Math.sqrt(mass / 200.0)));
+        double stiffness = LINEAR_STIFFNESS * massFactor;
+        double damping = LINEAR_DAMPING * massFactor;
+        double maxAcceleration = MAX_LINEAR_ACCELERATION * massFactor;
+
+        Vector3d velocity = new Vector3d(data.bodyVelocity);
+        Vector3d acceleration = diff.mul(stiffness)
+                .fma(damping, new Vector3d(data.targetVelocity).sub(velocity));
+        clampLength(acceleration, maxAcceleration);
+
+        Vector3d gravity = DimensionPhysicsData.getGravity(subLevel.getLevel(), pose.position(), new Vector3d());
+        acceleration.sub(gravity);
+
+        double dt = 1.0 / 20.0;
+        velocity.add(acceleration.mul(dt));
+        clampLength(velocity, MAX_BODY_SPEED);
+        data.bodyVelocity.set(velocity);
+
+        currentPos.add(velocity.mul(dt));
+        pose.position().set(currentPos);
+
+        // Angular alignment towards target orientation.
+        Quaterniond current = new Quaterniond(pose.orientation());
+        Quaterniond delta = new Quaterniond(targetOrientation)
+                .mul(new Quaterniond(current).conjugate())
+                .normalize();
+        double angle = 2.0 * Math.acos(Math.min(1.0, Math.abs(delta.w)));
+        if (angle > 0.01) {
+            Vector3d axis = new Vector3d(delta.x, delta.y, delta.z).normalize();
+            double turnSpeed = Math.min(angle, 0.15);
+            data.bodyAngularVelocity.set(axis.x * turnSpeed, axis.y * turnSpeed, axis.z * turnSpeed);
+        }
+        // Apply accumulated angular rotation.
+        if (data.bodyAngularVelocity.lengthSquared() > 0.0) {
+            double dtAng = dt;
+            Quaterniond rotDelta = new Quaterniond()
+                    .rotateX(data.bodyAngularVelocity.x * dtAng)
+                    .rotateY(data.bodyAngularVelocity.y * dtAng)
+                    .rotateZ(data.bodyAngularVelocity.z * dtAng);
+            current.mul(rotDelta);
+            pose.orientation().set(current);
+            data.bodyAngularVelocity.mul(0.9); // decay
+        }
     }
 
     /**
