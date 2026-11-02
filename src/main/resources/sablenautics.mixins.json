@@ -1,0 +1,18 @@
+{
+  "required": false,
+  "package": "ru.stepan1411.sablenautics.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "trains.StationBlockEntityMixin",
+    "trains.SubLevelMixin",
+    "trains.ServerSubLevelMixin",
+    "trains.AbstractBogeyBlockMixin",
+    "trains.CarriageMixin",
+    "trains.TrainMixin",
+    "trains.CarriageContraptionAccessor",
+    "trains.ContraptionAccessor",
+    "trains.DimensionalCarriageEntityMixin",
+    "controls.ControlsBlockMixin"
+  ],
+  "client": []
+}

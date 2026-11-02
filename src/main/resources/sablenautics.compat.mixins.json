@@ -1,0 +1,7 @@
+{
+  "required": false,
+  "package": "ru.stepan1411.sablenautics.compact",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [],
+  "client": []
+}
