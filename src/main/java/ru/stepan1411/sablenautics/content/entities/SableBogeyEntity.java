@@ -57,6 +57,8 @@ public class SableBogeyEntity extends Entity {
 
     private final Quaternionf smoothOrientation = new Quaternionf();
     private boolean smoothOrientationSet;
+    private Vec3 smoothPosition = Vec3.ZERO;
+    private boolean smoothPositionSet;
 
     public SableBogeyEntity(EntityType<?> type, Level level) {
         super(type, level);
@@ -105,6 +107,14 @@ public class SableBogeyEntity extends Entity {
                 smoothOrientationSet = true;
             } else {
                 smoothOrientation.slerp(target, 0.35f);
+            }
+
+            Vec3 position = new Vec3(getX(), getY(), getZ());
+            if (!smoothPositionSet) {
+                smoothPosition = position;
+                smoothPositionSet = true;
+            } else {
+                smoothPosition = smoothPosition.lerp(position, 0.5);
             }
             return;
         }
@@ -211,6 +221,10 @@ public class SableBogeyEntity extends Entity {
 
     public Quaternionf getSmoothedOrientation() {
         return new Quaternionf(smoothOrientationSet ? smoothOrientation : getSyncedOrientation());
+    }
+
+    public Vec3 getSmoothedPosition() {
+        return smoothPositionSet ? smoothPosition : position();
     }
 
     @Override

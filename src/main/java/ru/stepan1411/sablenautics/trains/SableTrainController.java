@@ -518,16 +518,32 @@ public final class SableTrainController {
         if (train == null || carriageIndex < 0 || carriageIndex >= train.carriages.size()) return null;
 
         BogieInfo info = data.bogies().get(bogieIndex);
-
-        // The wheel entity is glued to the carriage body. The body itself is what is held
-        // on the rails by the suspension, so the bogey can never jitter against the train.
         Pose3d bodyPose = body.logicalPose();
+
+        if (!data.detached()) {
+            Carriage carriage = train.carriages.get(carriageIndex);
+            carriage.updateContraptionAnchors();
+            ServerLevel level = body.getLevel();
+            DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(level.dimension());
+            Vector3dc centerOfMass = body.getMassTracker().getCenterOfMass();
+
+            if (dce != null && dce.positionAnchor != null && centerOfMass != null) {
+                // While the train is on the rails the wheels sit at the rail target,
+                // independently from the (possibly lagging) carriage body.
+                Quaterniond targetOrientation = computeTargetOrientation(dce, bodyPose, data.initialYaw());
+                Vector3d targetPosition = computeTargetPosition(body, dce.positionAnchor, targetOrientation);
+                Vector3d localOffset = new Vector3d(info.localPlotCenter()).sub(centerOfMass);
+                Vector3d world = new Vector3d(targetPosition)
+                        .add(targetOrientation.transform(localOffset, new Vector3d()));
+                float angleDelta = (float) (360.0 * train.speed / (Math.PI * 2.0 * info.wheelRadius()));
+                return new BogieTarget(new Vec3(world.x, world.y, world.z), targetOrientation, angleDelta);
+            }
+        }
+
+        // Torn off (or no rail anchor available): the wheels travel with the body.
         Vector3d world = bodyPose.transformPosition(info.localPlotCenter(), new Vector3d());
-        float angleDelta = data.detached()
-                ? 0.0f
-                : (float) (360.0 * train.speed / (Math.PI * 2.0 * info.wheelRadius()));
         return new BogieTarget(new Vec3(world.x, world.y, world.z),
-                new Quaterniond(bodyPose.orientation()), angleDelta);
+                new Quaterniond(bodyPose.orientation()), 0.0f);
     }
 
     private static void teleport(ServerSubLevel subLevel, Vector3d position, Quaterniond orientation,
