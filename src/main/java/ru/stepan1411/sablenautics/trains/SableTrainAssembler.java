@@ -146,7 +146,6 @@ public class SableTrainAssembler {
         }
 
         // Hide the wheel blocks inside the carriage with our own Sable bogey block.
-        // The visible wheel model is drawn by SableBogeyEntity.
         for (BogeyCapture capture : bogeyCaptures) {
             if (hideBogeyBlock(serverLevel, capture.globalPos())) {
                 globalPosSet.add(capture.globalPos());

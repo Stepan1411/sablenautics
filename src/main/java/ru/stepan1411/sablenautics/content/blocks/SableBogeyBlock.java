@@ -24,10 +24,7 @@ import ru.stepan1411.sablenautics.index.SablenauticsBogeyStyles;
 import ru.stepan1411.sablenautics.index.SablenauticsBlockEntityTypes;
 
 /**
- * Sable bogey block. It replaces the original bogey before the carriage is
- * moved into a Sable sub-level, so cars still contain a valid {@link AbstractBogeyBlock}
- * while the visible wheel model is drawn by {@code SableBogeyEntity}.
- * <p>
+ * Sable bogey block. Represents the wheel assembly of a Sable carriage.
  * The block hangs from the rail block above it — if the rail above is removed,
  * the bogey block detaches (drops itself as an item).
  */

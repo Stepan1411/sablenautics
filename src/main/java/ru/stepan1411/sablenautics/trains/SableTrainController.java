@@ -70,9 +70,8 @@ import org.apache.commons.lang3.mutable.MutableInt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.stepan1411.sablenautics.content.blocks.SableBogeyBlockEntity;
-import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
-import ru.stepan1411.sablenautics.content.entities.SableBogeyEntity;
 import ru.stepan1411.sablenautics.content.entities.SablenauticsEntities;
+import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
 
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -89,14 +88,14 @@ import java.util.function.Consumer;
 /**
  * Represents a Create carriage as a Sable sub-level.
  * <p>
- * The carriage body is a free rigid body. The visible wheel model is a separate
- * {@link ru.stepan1411.sablenautics.content.entities.SableBogeyEntity} (not a Sable
- * sub-level); the carriage itself keeps an invisible bogey block so Create's train data
- * and disassembly still work. While on rails the body is held by a longitudinal spring
- * and an angular rail joint. If it is pushed more than {@link #DETACH_DISTANCE} blocks
- * away from the rail target it tears off and the train is marked as derailed. A carriage
- * that runs out of track while still moving leaves the rails the same way and keeps its
- * momentum, so the train flies off the end instead of stopping dead.
+ * The carriage body is a free rigid body. The visible wheel model is drawn by the
+ * {@link SableBogeyBlock} placed under the rail; the carriage itself keeps an invisible
+ * bogey block so Create's train data and disassembly still work. While on rails the body
+ * is held by a longitudinal spring and an angular rail joint. If it is pushed more than
+ * {@link #DETACH_DISTANCE} blocks away from the rail target it tears off and the train
+ * is marked as derailed. A carriage that runs out of track while still moving leaves the
+ * rails the same way and keeps its momentum, so the train flies off the end instead of
+ * stopping dead.
  * <p>
  * There are no {@code CarriageContraptionEntity} objects in the world. Create still owns the
  * track graph, travelling points and all scheduling; this class only maps each carriage's
@@ -328,11 +327,8 @@ public final class SableTrainController {
 
         if (subLevel.getLevel() instanceof ServerLevel level) {
             for (int i = 0; i < safeBogies.size(); i++) {
-                SableBogeyEntity entity = new SableBogeyEntity(SablenauticsEntities.SABLE_BOGEY.get(), level);
-                entity.configure(train.id, carriageIndex, i, safeBogies.get(i));
-                level.addFreshEntity(entity);
-
                 // Place the physical bogey block under the rail so it hangs from the track.
+                // The block will be moved to its current rail position every tick in tickSubLevel.
                 Vec3 initialWorld = safeBogies.get(i).initialWorldPosition();
                 BlockPos bogeyPos = new BlockPos((int) initialWorld.x, (int) initialWorld.y, (int) initialWorld.z);
                 if (level.getBlockState(bogeyPos).isAir()) {
@@ -413,6 +409,30 @@ public final class SableTrainController {
 
         SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(serverLevel);
         PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
+
+        // Update bogey block positions in the world to match current rail positions.
+        // The bogey block hangs from the rail (one block below the travelling point).
+        if (!data.detached && pipeline != null) {
+            for (int i = 0; i < data.bogies().size(); i++) {
+                BogieInfo info = data.bogies().get(i);
+                Vector3d bogeyWorld = pose.transformPosition(info.localPlotCenter(), new Vector3d());
+                BlockPos bogeyPos = new BlockPos((int) bogeyWorld.x, (int) bogeyWorld.y - 1, (int) bogeyWorld.z);
+                BlockPos railPos = bogeyPos.above();
+
+                if (level.getBlockState(railPos).getBlock() instanceof ITrackBlock) {
+                    if (level.getBlockState(bogeyPos).getBlock() != SablenauticsBlocks.SABLE_BOGEY.get()) {
+                        level.setBlock(bogeyPos, SablenauticsBlocks.SABLE_BOGEY.get().defaultBlockState(), 3);
+                    }
+                    data.bogeyBlockPositions.set(i, bogeyPos.immutable());
+                } else {
+                    // No rail above — remove the bogey block (it detaches from the rail)
+                    if (level.getBlockState(bogeyPos).getBlock() == SablenauticsBlocks.SABLE_BOGEY.get()) {
+                        level.removeBlock(bogeyPos, false);
+                    }
+                    data.bogeyBlockPositions.set(i, null);
+                }
+            }
+        }
 
         // Align the freshly assembled / freshly loaded carriage once.
         if (!data.initialized) {
@@ -1725,7 +1745,7 @@ public final class SableTrainController {
 
         for (Entity entity : level.getEntitiesOfClass(Entity.class, worldBounds.inflate(1.5))) {
             if (!entity.isAlive() || entity.isSpectator()) continue;
-            if (entity instanceof ItemEntity || entity instanceof SableBogeyEntity) continue;
+            if (entity instanceof ItemEntity) continue;
             if (riders.contains(entity.getUUID())) continue;
             if (Sable.HELPER.getTrackingSubLevel(entity) == subLevel) continue;
             if (!entity.onGround()) continue;
@@ -1892,7 +1912,6 @@ public final class SableTrainController {
             removeConstraint(data.nextContactJoint);
             data.nextContactJoint = null;
             LINKED_TRAINS.remove(data.trainId());
-            SableBogeyEntity.discardForCarriage(data.trainId(), data.carriageIndex());
             removeBogeyBlocks(data);
             SUBLEVELS.remove(data.subLevel().getUniqueId());
         }
@@ -1913,7 +1932,6 @@ public final class SableTrainController {
     }
 
     public static int purgeSubLevels(ServerLevel level, UUID trainId) {
-        SableBogeyEntity.discardForTrain(trainId);
         SubLevelContainer container = SubLevelContainer.getContainer(level);
         if (container == null) return 0;
 
@@ -2182,6 +2200,5 @@ public final class SableTrainController {
         }
         SUBLEVELS.clear();
         LINKED_TRAINS.clear();
-        SableBogeyEntity.clearTracked();
     }
 }

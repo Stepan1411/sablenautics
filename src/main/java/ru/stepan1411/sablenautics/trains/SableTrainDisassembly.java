@@ -33,8 +33,6 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3d;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import ru.stepan1411.sablenautics.content.entities.SableBogeyEntity;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -146,7 +144,6 @@ public final class SableTrainDisassembly {
         }
 
         SableTrainControlManager.stopForTrain(level.getServer(), train.id);
-        SableBogeyEntity.discardForTrain(train.id);
         Create.RAILWAYS.removeTrain(train.id);
         CatnipServices.NETWORK.sendToAllClients(new RemoveTrainPacket(train));
         LOGGER.info("Sablenautics: Disassembled train {} into blocks", train.id);
