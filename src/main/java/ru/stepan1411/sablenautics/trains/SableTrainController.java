@@ -69,6 +69,8 @@ import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.stepan1411.sablenautics.content.blocks.SableBogeyBlockEntity;
+import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
 import ru.stepan1411.sablenautics.content.entities.SableBogeyEntity;
 import ru.stepan1411.sablenautics.content.entities.SablenauticsEntities;
 
@@ -115,6 +117,7 @@ public final class SableTrainController {
     private static final String FLY_OFF_ANCHOR_X_KEY = "sablenautics_fly_off_anchor_x";
     private static final String FLY_OFF_ANCHOR_Y_KEY = "sablenautics_fly_off_anchor_y";
     private static final String FLY_OFF_ANCHOR_Z_KEY = "sablenautics_fly_off_anchor_z";
+    private static final String BOGEY_BLOCK_POSITIONS_KEY = "sablenautics_bogey_block_positions";
     private static final String APPROACH_START_TICK_KEY = "sablenautics_approach_start_tick";
     private static final String APPROACH_TARGET_X_KEY = "sablenautics_approach_target_x";
     private static final String APPROACH_TARGET_Y_KEY = "sablenautics_approach_target_y";
@@ -181,6 +184,8 @@ public final class SableTrainController {
         private final Direction assemblyDirection;
         private final List<AABB> superglue;
         private final List<BogieInfo> bogies;
+        /** World positions of bogey blocks (one per bogey), used to place/remove the physical block. */
+        private final List<BlockPos> bogeyBlockPositions = new ArrayList<>();
 
         /**
          * Controls that have a Blaze Burner (or another conductor block) attached.
@@ -326,6 +331,14 @@ public final class SableTrainController {
                 SableBogeyEntity entity = new SableBogeyEntity(SablenauticsEntities.SABLE_BOGEY.get(), level);
                 entity.configure(train.id, carriageIndex, i, safeBogies.get(i));
                 level.addFreshEntity(entity);
+
+                // Place the physical bogey block under the rail so it hangs from the track.
+                Vec3 initialWorld = safeBogies.get(i).initialWorldPosition();
+                BlockPos bogeyPos = new BlockPos((int) initialWorld.x, (int) initialWorld.y, (int) initialWorld.z);
+                if (level.getBlockState(bogeyPos).isAir()) {
+                    level.setBlock(bogeyPos, SablenauticsBlocks.SABLE_BOGEY.get().defaultBlockState(), 3);
+                    data.bogeyBlockPositions.add(bogeyPos.immutable());
+                }
             }
         }
 
@@ -1880,7 +1893,22 @@ public final class SableTrainController {
             data.nextContactJoint = null;
             LINKED_TRAINS.remove(data.trainId());
             SableBogeyEntity.discardForCarriage(data.trainId(), data.carriageIndex());
+            removeBogeyBlocks(data);
             SUBLEVELS.remove(data.subLevel().getUniqueId());
+        }
+    }
+
+    /**
+     * Removes all physical bogey blocks placed in the world for this carriage.
+     */
+    private static void removeBogeyBlocks(SubLevelData data) {
+        if (data.subLevel().getLevel() instanceof ServerLevel level) {
+            for (BlockPos pos : data.bogeyBlockPositions) {
+                if (level.getBlockState(pos).getBlock() == SablenauticsBlocks.SABLE_BOGEY.get()) {
+                    level.removeBlock(pos, false);
+                }
+            }
+            data.bogeyBlockPositions.clear();
         }
     }
 
@@ -1981,6 +2009,14 @@ public final class SableTrainController {
             data.approachTargetPosition = null;
             data.approachTargetOrientation = null;
         }
+
+        // Restore bogey block positions from NBT.
+        if (userData.contains(BOGEY_BLOCK_POSITIONS_KEY, net.minecraft.nbt.Tag.TAG_LIST)) {
+            net.minecraft.nbt.ListTag list = userData.getList(BOGEY_BLOCK_POSITIONS_KEY, net.minecraft.nbt.Tag.TAG_COMPOUND);
+            for (int i = 0; i < list.size(); i++) {
+                NbtUtils.readBlockPos(list.getCompound(i), "").ifPresent(pos -> data.bogeyBlockPositions.add(pos));
+            }
+        }
         if (userData.contains(FLY_OFF_ANCHOR_X_KEY)) {
             data.flyOffAnchor = new Vec3(userData.getDouble(FLY_OFF_ANCHOR_X_KEY),
                     userData.getDouble(FLY_OFF_ANCHOR_Y_KEY),
@@ -1988,6 +2024,15 @@ public final class SableTrainController {
         }
         // A detached carriage keeps the pose it was saved with; an attached one is aligned once.
         data.initialized = data.detached;
+
+        // Re-place physical bogey blocks in the world under the rail.
+        if (subLevel.getLevel() instanceof ServerLevel level) {
+            for (BlockPos pos : data.bogeyBlockPositions) {
+                if (level.getBlockState(pos).isAir()) {
+                    level.setBlock(pos, SablenauticsBlocks.SABLE_BOGEY.get().defaultBlockState(), 3);
+                }
+            }
+        }
 
         SUBLEVELS.put(subLevel.getUniqueId(), data);
         LOGGER.info("Sablenautics: Restored sublevel {} for train {} carriage {} ({} bogey entity data, detached {}, flew off {})",
@@ -2022,6 +2067,17 @@ public final class SableTrainController {
             bodyData.putFloat(APPROACH_TARGET_YAW_KEY, (float) Math.atan2(sinY, cosY));
         } else {
             bodyData.remove(APPROACH_TARGET_YAW_KEY);
+        }
+
+        // Persist bogey block positions so they can be re-placed after reload.
+        if (!data.bogeyBlockPositions.isEmpty()) {
+            net.minecraft.nbt.ListTag list = new net.minecraft.nbt.ListTag();
+            for (BlockPos pos : data.bogeyBlockPositions) {
+                list.add(NbtUtils.writeBlockPos(pos));
+            }
+            bodyData.put(BOGEY_BLOCK_POSITIONS_KEY, list);
+        } else {
+            bodyData.remove(BOGEY_BLOCK_POSITIONS_KEY);
         }
 
         Vec3 anchor = data.flyOffAnchor;

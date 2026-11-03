@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": { "model": "sablenautics:block/sticker", "y": 180 },
+    "facing=south": { "model": "sablenautics:block/sticker" },
+    "facing=west": { "model": "sablenautics:block/sticker", "y": 90 },
+    "facing=east": { "model": "sablenautics:block/sticker", "y": 270 }
+  }
+}
