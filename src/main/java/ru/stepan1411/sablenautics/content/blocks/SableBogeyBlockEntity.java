@@ -2,15 +2,21 @@ package ru.stepan1411.sablenautics.content.blocks;
 
 import com.simibubi.create.content.trains.bogey.AbstractBogeyBlockEntity;
 import com.simibubi.create.content.trains.bogey.BogeyStyle;
-import com.simibubi.create.content.trains.track.ITrackBlock;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.UUIDUtil;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.core.HolderLookup.Provider;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import ru.stepan1411.sablenautics.index.SablenauticsBogeyStyles;
 
+import java.util.UUID;
+
 public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
 
-    private boolean railAbove = false;
+    private UUID trainId;
+    private int carriageIndex = -1;
+    private int bogieIndex = -1;
 
     public SableBogeyBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
         super(type, pos, state);
@@ -21,22 +27,41 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
         return SablenauticsBogeyStyles.SABLE;
     }
 
-    public void tick() {
-        if (level != null && !level.isClientSide) {
-            boolean hasRail = level.getBlockState(worldPosition.above()).getBlock() instanceof ITrackBlock;
-            if (hasRail != railAbove) {
-                railAbove = hasRail;
-                if (!hasRail) {
-                    // Rail above removed - bogey detaches from the rail
-                    level.removeBlock(worldPosition, false);
-                    net.minecraft.world.level.block.Block.popResource(level, worldPosition, new net.minecraft.world.item.ItemStack(getBlockState().getBlock()));
-                }
-            }
-        }
+    public void setTrainInfo(UUID trainId, int carriageIndex, int bogieIndex) {
+        this.trainId = trainId;
+        this.carriageIndex = carriageIndex;
+        this.bogieIndex = bogieIndex;
     }
 
-    public boolean hasRailAbove() {
-        return railAbove;
+    public UUID getTrainId() {
+        return trainId;
+    }
+
+    public int getCarriageIndex() {
+        return carriageIndex;
+    }
+
+    public int getBogieIndex() {
+        return bogieIndex;
+    }
+
+    @Override
+    protected void saveAdditional(CompoundTag tag, Provider registries) {
+        super.saveAdditional(tag, registries);
+        if (trainId != null) {
+            tag.putUUID("TrainId", trainId);
+        }
+        tag.putInt("CarriageIndex", carriageIndex);
+        tag.putInt("BogieIndex", bogieIndex);
+    }
+
+    @Override
+    public void loadAdditional(CompoundTag tag, Provider registries) {
+        super.loadAdditional(tag, registries);
+        if (tag.hasUUID("TrainId")) {
+            trainId = tag.getUUID("TrainId");
+        }
+        carriageIndex = tag.getInt("CarriageIndex");
+        bogieIndex = tag.getInt("BogieIndex");
     }
 }
-

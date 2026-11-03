@@ -333,6 +333,10 @@ public final class SableTrainController {
                 BlockPos bogeyPos = new BlockPos((int) initialWorld.x, (int) initialWorld.y, (int) initialWorld.z);
                 if (level.getBlockState(bogeyPos).isAir()) {
                     level.setBlock(bogeyPos, SablenauticsBlocks.SABLE_BOGEY.get().defaultBlockState(), 3);
+                    net.minecraft.world.level.block.entity.BlockEntity be = level.getBlockEntity(bogeyPos);
+                    if (be instanceof SableBogeyBlockEntity bbe) {
+                        bbe.setTrainInfo(train.id, carriageIndex, i);
+                    }
                     data.bogeyBlockPositions.add(bogeyPos.immutable());
                 }
             }
