@@ -25,7 +25,7 @@ import ru.stepan1411.sablenautics.index.SablenauticsBlockEntityTypes;
 
 /**
  * Sable bogey block. Represents the wheel assembly of a Sable carriage.
- * The block hangs from the rail block above it — if the rail above is removed,
+ * The block sits ON the rail block below it — if the rail below is removed,
  * the bogey block detaches (drops itself as an item).
  */
 public class SableBogeyBlock extends AbstractBogeyBlock<SableBogeyBlockEntity> {
@@ -85,23 +85,23 @@ public class SableBogeyBlock extends AbstractBogeyBlock<SableBogeyBlockEntity> {
     }
 
     /**
-     * A bogey block can only exist under a rail block — it hangs from the rail above.
+     * A bogey block can only exist on top of a rail block — it sits on the rail below.
      */
     @Override
     public boolean canSurvive(BlockState state, LevelReader level, BlockPos pos) {
-        BlockState above = level.getBlockState(pos.above());
-        return above.getBlock() instanceof ITrackBlock;
+        BlockState below = level.getBlockState(pos.below());
+        return below.getBlock() instanceof ITrackBlock;
     }
 
     /**
-     * When the rail above is removed, the bogey block detaches and drops itself.
+     * When the rail below is removed, the bogey block detaches and drops itself.
      */
     @Override
     public void neighborChanged(BlockState state, Level level, BlockPos pos, Block neighborBlock, BlockPos fromPos,
                                 boolean isMoving) {
-        if (fromPos != null && fromPos.equals(pos.above())) {
-            if (!(level.getBlockState(pos.above()).getBlock() instanceof ITrackBlock)) {
-                // Rail above was removed — bogey detaches from the rail.
+        if (fromPos != null && fromPos.equals(pos.below())) {
+            if (!(level.getBlockState(pos.below()).getBlock() instanceof ITrackBlock)) {
+                // Rail below was removed — bogey detaches from the rail.
                 level.removeBlock(pos, false);
                 popResource(level, pos, new ItemStack(this));
             }
