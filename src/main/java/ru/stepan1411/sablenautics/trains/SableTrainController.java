@@ -25,6 +25,7 @@ import com.simibubi.create.content.trains.graph.TrackGraphHelper;
 import com.simibubi.create.content.trains.graph.TrackGraphLocation;
 import com.simibubi.create.content.trains.graph.TrackNode;
 import com.simibubi.create.content.trains.graph.TrackNodeLocation;
+import com.simibubi.create.content.trains.station.StationBlock;
 import com.simibubi.create.content.trains.track.FakeTrackBlock;
 import com.simibubi.create.content.trains.track.ITrackBlock;
 import com.simibubi.create.foundation.damageTypes.CreateDamageSources;
@@ -217,6 +218,12 @@ public final class SableTrainController {
     private static final double FREE_ROLL_TARGET_GAIN = 1.0;
     /** Body offset (blocks) below which a physics-driven train is considered stopped. */
     private static final double FREE_ROLL_OFFSET_DEADZONE = 0.002;
+    /** Extra distance ahead of a carriage that is checked for terrain collisions. */
+    private static final double WALL_PROBE_MARGIN = 0.75;
+    /** Deceleration (blocks per second squared) applied while a carriage is against a wall. */
+    private static final double WALL_BRAKE_ACCELERATION = 20.0;
+    /** Ticks a wall hit is remembered, so the logical train also stops between carriages' ticks. */
+    private static final int WALL_BLOCKED_MEMORY_TICKS = 2;
 
     /** Body sub-level UUID -> carriage data. */
     private static final Map<UUID, SubLevelData> SUBLEVELS = new HashMap<>();
@@ -232,6 +239,8 @@ public final class SableTrainController {
     private static final Map<UUID, TrackGraph> DETACHED_GRAPHS = new HashMap<>();
     /** Logical speed (blocks/tick) the train had before it left the rails. */
     private static final Map<UUID, Double> DETACHED_TRAIN_SPEED = new HashMap<>();
+    /** Last game tick at which a carriage of the train hit a solid block ahead. */
+    private static final Map<UUID, Long> BLOCKED_TRAINS = new HashMap<>();
 
     /**
      * Mutable state of one carriage. Accessor method names intentionally match the old
@@ -554,7 +563,8 @@ public final class SableTrainController {
         // A train nobody is driving follows actual physics: anything that pushes the carriage
         // bodies (another contraption, a piston, an explosion, a thrown object) rolls the
         // train along its rails instead of being absorbed by the rail spring.
-        updatePhysicsDrivenSpeed(train, data);
+        updateWallObstruction(train, data, serverSubLevel, serverLevel, pose);
+        updatePhysicsDrivenSpeed(train, data, serverLevel);
 
         double bodyError = pose.position().distance(targetPosition);
         if (isTornOff(train, data, pose, targetPosition, bodyError)) {
@@ -1670,7 +1680,9 @@ public final class SableTrainController {
 
         Vector3d acceleration;
         Train train = Create.RAILWAYS.trains.get(data.trainId());
-        boolean freeRolling = isFreeRolling(train);
+        ServerLevel level = subLevel.getLevel();
+        boolean wallBlocked = level != null && isWallBlocked(data.trainId(), level.getGameTime());
+        boolean freeRolling = isFreeRolling(train) || wallBlocked;
         Vec3 forward = freeRolling ? railForward(train, data) : Vec3.ZERO;
         boolean hasAxis = forward.lengthSqr() > 1.0e-8;
 
@@ -1693,17 +1705,21 @@ public final class SableTrainController {
             // The carriage that drives the logical train is not pulled along the track at
             // all: it is the body that was actually pushed. Pulling it towards its own
             // target would make the train swing back and forth like a pendulum. The other
-            // carriages follow it through a critically damped spring.
-            if (!data.physicsDriver) {
+            // carriages follow it through a critically damped spring. While the train is
+            // touching terrain no carriage is pulled along the track, so the spring cannot
+            // push it through the obstacle.
+            if (!data.physicsDriver && !wallBlocked) {
                 acceleration.fma(FREE_ROLL_STIFFNESS * alongError
                         + FREE_ROLL_DAMPING * alongVelocityError, axis);
             }
 
-            // Rolling resistance makes an unpowered train come to rest on its own.
+            // Rolling resistance makes an unpowered train come to rest on its own. A train
+            // that ran into terrain is braked much harder.
             double alongVelocity = velocity.dot(axis);
             if (Math.abs(alongVelocity) > 1.0e-4) {
                 double dt = Math.max(timeStep, 1.0 / 20.0 / 8.0);
-                double resistance = Math.min(ROLLING_RESISTANCE, Math.abs(alongVelocity) / dt);
+                double maxResistance = wallBlocked ? WALL_BRAKE_ACCELERATION : ROLLING_RESISTANCE;
+                double resistance = Math.min(maxResistance, Math.abs(alongVelocity) / dt);
                 acceleration.fma(-Math.signum(alongVelocity) * resistance, axis);
             }
         } else {
@@ -1825,6 +1841,94 @@ public final class SableTrainController {
     }
 
     /**
+     * Casts a few short rays in front of a carriage and remembers a hit for a couple of
+     * ticks. Rails and station blocks are ignored so normal track travel is not blocked.
+     * <p>
+     * This is needed because Sable carriages have no {@code CarriageContraptionEntity},
+     * which is what normally stops Create trains at terrain. Without it the rail spring can
+     * keep pushing a carriage through a wall.
+     */
+    private static void updateWallObstruction(Train train, SubLevelData data, ServerSubLevel body,
+                                              ServerLevel level, Pose3d pose) {
+        Vec3 forward = railForward(train, data);
+        if (forward.lengthSqr() < 1.0e-8) return;
+
+        double motion = train.speed;
+        if (Math.abs(motion) < 1.0e-4) motion = train.targetSpeed;
+        if (Math.abs(motion) < 1.0e-4) {
+            Vector3dc velocity = body.latestLinearVelocity;
+            motion = forward.x * velocity.x() + forward.y * velocity.y() + forward.z * velocity.z();
+        }
+
+        // A parked train that is not already blocked does not need the check. Keep probing
+        // while it is blocked so the hold clears as soon as the obstacle is gone.
+        if (Math.abs(motion) < 1.0e-3 && !isWallBlocked(train.id, level.getGameTime())) {
+            return;
+        }
+
+        Vec3 direction = motion < 0.0 ? forward.scale(-1.0) : forward;
+        BoundingBox3ic plotBounds = body.getPlot().getBoundingBox();
+        if (plotBounds == null) return;
+        AABB bounds = worldBounds(plotBounds, pose);
+        if (bounds == null) return;
+
+        Vec3 center = bounds.getCenter();
+        double halfLength = (Math.abs(direction.x) * (bounds.maxX - bounds.minX)
+                + Math.abs(direction.y) * (bounds.maxY - bounds.minY)
+                + Math.abs(direction.z) * (bounds.maxZ - bounds.minZ)) * 0.5;
+        double distance = Math.min(halfLength + WALL_PROBE_MARGIN, 12.0);
+        double height = bounds.maxY - bounds.minY;
+
+        for (double verticalOffset : new double[]{0.0, height * 0.3, -height * 0.45}) {
+            Vec3 start = center.add(0.0, verticalOffset, 0.0);
+            Vec3 end = start.add(direction.scale(distance));
+            if (hasBlockingWorldBlock(level, start, end, direction)) {
+                BLOCKED_TRAINS.put(train.id, level.getGameTime());
+                return;
+            }
+        }
+    }
+
+    private static boolean hasBlockingWorldBlock(ServerLevel level, Vec3 start, Vec3 end, Vec3 direction) {
+        double length = start.distanceTo(end);
+        if (length <= 1.0e-4) return false;
+
+        int steps = Math.max(1, (int) Math.ceil(length / 0.2));
+        BlockPos last = null;
+        for (int i = 0; i <= steps; i++) {
+            Vec3 sample = start.add(direction.scale(length * i / steps));
+            BlockPos pos = BlockPos.containing(sample);
+            if (pos.equals(last)) continue;
+            last = pos;
+            if (!level.isLoaded(pos)) continue;
+
+            BlockState state = level.getBlockState(pos);
+            boolean ignorable = state.isAir()
+                    || state.canBeReplaced()
+                    || state.getBlock() instanceof ITrackBlock
+                    || state.getBlock() instanceof FakeTrackBlock
+                    || state.getBlock() instanceof StationBlock
+                    || state.getCollisionShape(level, pos).isEmpty();
+            if (!ignorable) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @return true when a carriage of this train is currently touching solid terrain
+     */
+    public static boolean isWallBlocked(Train train, long gameTime) {
+        if (train == null) return false;
+        return isWallBlocked(train.id, gameTime);
+    }
+
+    private static boolean isWallBlocked(UUID trainId, long gameTime) {
+        Long since = BLOCKED_TRAINS.get(trainId);
+        return since != null && gameTime - since <= WALL_BLOCKED_MEMORY_TICKS;
+    }
+
+
+    /**
      * The physical bodies on the rails are independent rigid bodies. Create, however, only
      * advances the train because of its logical {@code train.speed}. While nobody drives the
      * train, move the logical rail target towards the bodies that were actually pushed, so
@@ -1836,8 +1940,22 @@ public final class SableTrainController {
      * <p>
      * Called once per train per tick (from the leading carriage).
      */
-    private static void updatePhysicsDrivenSpeed(Train train, SubLevelData data) {
+    private static void updatePhysicsDrivenSpeed(Train train, SubLevelData data, ServerLevel level) {
         if (!isAutoAttachLeader(train, data)) return;
+
+        // A train that ran into terrain must stay stopped, and its spring must not keep
+        // pushing it through the obstacle. Keep targetSpeed so reverse input can still be
+        // used to back away from the wall.
+        if (isWallBlocked(train.id, level.getGameTime())) {
+            train.speed = 0.0;
+            train.speedBeforeStall = null;
+            for (SubLevelData other : SUBLEVELS.values()) {
+                if (other.trainId().equals(train.id)) {
+                    other.physicsDriver = false;
+                }
+            }
+            return;
+        }
 
         // A docked train must stay parked. Without this, residual momentum of its physical
         // bodies would immediately feed back into Create's logical speed and the train would
@@ -2966,6 +3084,7 @@ public final class SableTrainController {
         LAST_TRAIN_SPEED.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         DETACHED_GRAPHS.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         DETACHED_TRAIN_SPEED.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
+        BLOCKED_TRAINS.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
     }
 
     private static int countLiveBodies(Train train) {
@@ -3223,5 +3342,6 @@ public final class SableTrainController {
         LAST_TRAIN_SPEED.clear();
         DETACHED_GRAPHS.clear();
         DETACHED_TRAIN_SPEED.clear();
+        BLOCKED_TRAINS.clear();
     }
 }

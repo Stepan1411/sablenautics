@@ -69,6 +69,22 @@ public abstract class TrainMixin implements SableTrainAccess {
         migratingPoints.clear();
     }
 
+    /**
+     * A Sable train has no carriage entity to stop it at terrain. The controller detects a
+     * blocked carriage and must freeze the logical train before Create advances its
+     * travelling points into the obstacle.
+     */
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void sablenautics$stopAtWall(Level level, CallbackInfo ci) {
+        Train train = (Train) (Object) this;
+        if (SableTrainController.isWallBlocked(train, level.getGameTime())) {
+            // Keep targetSpeed so the player can still select reverse and back away; only
+            // the actual movement towards the obstacle is frozen.
+            train.speed = 0;
+            train.speedBeforeStall = null;
+        }
+    }
+
     @Inject(method = "tick", at = @At("TAIL"))
     private void sablenautics$logDerail(Level level, CallbackInfo ci) {
         Train train = (Train) (Object) this;
