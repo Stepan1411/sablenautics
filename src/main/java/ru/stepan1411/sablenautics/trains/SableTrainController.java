@@ -98,11 +98,13 @@ import java.util.function.Consumer;
  * The carriage body is a free rigid body. The visible wheel model is rendered by the
  * Sable bogey block entity inside the body sub-level; the carriage itself keeps an
  * invisible bogey block so Create's train data and disassembly still work. While on rails
- * the body is held by a longitudinal spring
- * and an angular rail joint. If it is pushed more than {@link #DETACH_DISTANCE} blocks
- * away from the rail target it tears off and the train is marked as derailed. A carriage
- * that runs out of track while still moving leaves the rails the same way and keeps its
- * momentum, so the train flies off the end instead of stopping dead.
+ * the body is held by a spring and an angular rail joint. When nobody drives the train the
+ * spring only holds it laterally and vertically, so any physical push rolls it along the
+ * rails; the logical rail target follows the pushed body. If the body is pushed sideways
+ * more than {@link #DETACH_DISTANCE} blocks away from the rail target it tears off and the
+ * train is marked as derailed. A carriage that runs out of track while still moving leaves
+ * the rails the same way and keeps its momentum, so the train flies off the end instead of
+ * stopping dead.
  * <p>
  * Detaching always affects the whole train. Its travelling points are suspended so Create's
  * collision scan cannot make other trains crash into a body that is no longer on the rails.
@@ -207,8 +209,14 @@ public final class SableTrainController {
     private static final double FREE_ROLL_DAMPING = 2.0;
     /** Constant deceleration (blocks per second squared) of an unpowered train. */
     private static final double ROLLING_RESISTANCE = 1.0;
-    /** Body speed (blocks per second) below which a physics-driven train is considered stopped. */
-    private static final double PHYSICS_ROLL_DEADZONE = 0.1;
+    /**
+     * How much of the body's offset from its wheel target is turned into logical train
+     * movement each tick. The target chases the body, so this naturally reaches zero when
+     * the body stops and cannot run away.
+     */
+    private static final double FREE_ROLL_TARGET_GAIN = 0.5;
+    /** Body offset (blocks) below which a physics-driven train is considered stopped. */
+    private static final double FREE_ROLL_OFFSET_DEADZONE = 0.005;
 
     /** Body sub-level UUID -> carriage data. */
     private static final Map<UUID, SubLevelData> SUBLEVELS = new HashMap<>();
@@ -1607,9 +1615,9 @@ public final class SableTrainController {
 
     /**
      * Called before every physics sub-step from {@code ServerSubLevel#prePhysicsTick}.
-     * The body is held by the longitudinal spring; the rail joint (hard angular lock)
-     * keeps it aligned. The wheel sub-level only gets anti-gravity so it stays exactly
-     * on its teleported rail pose.
+     * When the train is driven, the body is held by the longitudinal spring; when it is
+     * pushed by the world, only the lateral/vertical axes are held and the carriage can
+     * roll along the rails. The rail joint (hard angular lock) keeps it aligned.
      */
     public static void prePhysicsTick(ServerSubLevel subLevel, RigidBodyHandle handle, double timeStep) {
         SubLevelData data = SUBLEVELS.get(subLevel.getUniqueId());
@@ -1809,8 +1817,12 @@ public final class SableTrainController {
     /**
      * The physical bodies on the rails are independent rigid bodies. Create, however, only
      * advances the train because of its logical {@code train.speed}. While nobody drives the
-     * train, feed the actual body velocity back into Create so a push from any object rolls
-     * the train along its rails instead of being cancelled out by the rail spring.
+     * train, move the logical rail target towards the bodies that were actually pushed, so
+     * any object can roll the train along its rails.
+     * <p>
+     * The movement is derived from the body's <em>offset</em> from its wheel target, not from
+     * its velocity. That makes the coupling self-terminating: once the body stops, the target
+     * catches up and the logical speed drops to zero instead of feeding the momentum back.
      * <p>
      * Called once per train per tick (from the leading carriage).
      */
@@ -1819,14 +1831,12 @@ public final class SableTrainController {
         if (!isFreeRolling(train)) return;
 
         double bestSpeed = 0.0;
-        boolean found = false;
         for (SubLevelData other : SUBLEVELS.values()) {
             if (!other.trainId().equals(train.id)) continue;
             if (other.detached() || other.subLevel().isRemoved()) continue;
 
             Vec3 forward = railForward(train, other);
             if (forward.lengthSqr() < 1.0e-8) continue;
-            found = true;
 
             Vector3dc velocity = other.subLevel().latestLinearVelocity;
             double along = forward.x * velocity.x()
@@ -1836,11 +1846,38 @@ public final class SableTrainController {
                 bestSpeed = along;
             }
         }
+
+        // Follow the carriage that leads the movement. Carriages that lag behind their own
+        // targets must not slow the whole train down; their suspension pulls them along.
+        double bestOffset = 0.0;
+        boolean found = false;
+        for (SubLevelData other : SUBLEVELS.values()) {
+            if (!other.trainId().equals(train.id)) continue;
+            if (other.detached() || other.subLevel().isRemoved()) continue;
+
+            double offset = railOffsetAlong(train, other);
+            if (!found) {
+                bestOffset = offset;
+                found = true;
+            } else if (bestSpeed > 0.0) {
+                bestOffset = Math.max(bestOffset, offset);
+            } else if (bestSpeed < 0.0) {
+                bestOffset = Math.min(bestOffset, offset);
+            } else if (Math.abs(offset) > Math.abs(bestOffset)) {
+                bestOffset = offset;
+            }
+        }
         if (!found) return;
 
-        double speedPerTick = Math.abs(bestSpeed) < PHYSICS_ROLL_DEADZONE
+        double speedPerTick = Math.abs(bestOffset) < FREE_ROLL_OFFSET_DEADZONE
                 ? 0.0
-                : bestSpeed / 20.0;
+                : bestOffset * FREE_ROLL_TARGET_GAIN;
+
+        // Never drive the logical train against the direction the bodies are actually
+        // moving: a lagging carriage at the back must slow the target down, not reverse it.
+        if (bestSpeed > 0.05 && speedPerTick < 0.0) speedPerTick = 0.0;
+        if (bestSpeed < -0.05 && speedPerTick > 0.0) speedPerTick = 0.0;
+
         double maxSpeed = Math.max(train.maxSpeed(), MAX_BODY_SPEED / 20.0);
 
         train.speed = Mth.clamp(speedPerTick, -maxSpeed, maxSpeed);
@@ -1853,6 +1890,43 @@ public final class SableTrainController {
                 train.leaveStation();
             }
         }
+    }
+
+    /**
+     * @return how far the carriage body is ahead of its wheel target along the track,
+     *         in blocks (negative when it is behind)
+     */
+    private static double railOffsetAlong(Train train, SubLevelData data) {
+        Vec3 forward = railForward(train, data);
+        if (forward.lengthSqr() < 1.0e-8) return 0.0;
+
+        int index = data.carriageIndex();
+        if (index < 0 || index >= train.carriages.size()) return 0.0;
+
+        ServerSubLevel body = data.subLevel();
+        ServerLevel level = body.getLevel();
+        if (level == null) return 0.0;
+
+        Vector3dc centerOfMass = body.getMassTracker().getCenterOfMass();
+        if (centerOfMass == null) return 0.0;
+
+        // Read the current anchors instead of the cached target: the leading carriage may be
+        // ticked before its neighbours, and then their cached target is one tick old.
+        Carriage carriage = train.carriages.get(index);
+        carriage.updateContraptionAnchors();
+        DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(level.dimension());
+        if (dce == null || dce.positionAnchor == null) return 0.0;
+
+        Pose3d pose = body.logicalPose();
+        Vector3d localOffset = localAnchorOffset(body, centerOfMass);
+        Vector3d bodyAnchor = pose.orientation()
+                .transform(localOffset, new Vector3d())
+                .add(pose.position());
+
+        Vector3d axis = new Vector3d(forward.x, forward.y, forward.z).normalize();
+        return new Vector3d(bodyAnchor)
+                .sub(new Vector3d(dce.positionAnchor.x, dce.positionAnchor.y, dce.positionAnchor.z))
+                .dot(axis);
     }
 
     /**
