@@ -1,6 +1,7 @@
 package ru.stepan1411.sablenautics.client;
 
 import com.mojang.blaze3d.platform.InputConstants;
+import com.simibubi.create.AllItems;
 import com.simibubi.create.Create;
 import com.simibubi.create.content.trains.HonkPacket;
 import com.simibubi.create.content.trains.TrainHUD;
@@ -12,7 +13,9 @@ import com.simibubi.create.foundation.utility.CreateLang;
 import com.simibubi.create.infrastructure.config.AllConfigs;
 import net.createmod.catnip.animation.LerpedFloat;
 import net.createmod.catnip.animation.LerpedFloat.Chaser;
+import net.createmod.catnip.math.AngleHelper;
 import net.createmod.catnip.platform.CatnipServices;
+import net.createmod.catnip.placement.PlacementClient;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
@@ -20,6 +23,8 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.GameType;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
@@ -28,6 +33,7 @@ import net.neoforged.neoforge.client.event.RenderGuiEvent;
 import org.lwjgl.glfw.GLFW;
 import ru.stepan1411.sablenautics.network.SablenauticsNetwork;
 import ru.stepan1411.sablenautics.network.TrainControlStartPayload;
+import ru.stepan1411.sablenautics.network.TrainControlStatusPayload;
 
 import java.util.HashSet;
 import java.util.List;
@@ -47,6 +53,8 @@ public final class ClientSableTrainControls {
     private static UUID trainId;
     private static int carriageIndex;
     private static boolean inverted;
+    private static boolean derailed;
+    private static float trainYaw;
 
     private static final Set<Integer> PRESSED = new HashSet<>();
     private static int lastMask;
@@ -65,6 +73,8 @@ public final class ClientSableTrainControls {
         trainId = payload.trainId();
         carriageIndex = payload.carriageIndex();
         inverted = payload.inverted();
+        derailed = false;
+        trainYaw = 0.0f;
         PRESSED.clear();
         lastMask = 0;
         inputCooldown = 0;
@@ -90,12 +100,20 @@ public final class ClientSableTrainControls {
 
     private static void reset() {
         trainId = null;
+        derailed = false;
+        trainYaw = 0.0f;
         PRESSED.clear();
         editedThrottle = -1;
         usedToHonk = false;
         lastMask = 0;
         inputCooldown = 0;
         throttleCooldown = 0;
+    }
+
+    public static void applyStatus(TrainControlStatusPayload payload) {
+        if (trainId == null || !trainId.equals(payload.trainId())) return;
+        derailed = payload.derailed();
+        trainYaw = payload.yaw();
     }
 
     @SubscribeEvent
@@ -277,6 +295,43 @@ public final class ClientSableTrainControls {
                 AllGuiTextures.TRAIN_HUD_THROTTLE.getStartY(), width, height, 256, 256);
         AllGuiTextures.TRAIN_HUD_THROTTLE_POINTER.render(graphics,
                 Math.max(1, AllGuiTextures.TRAIN_HUD_THROTTLE.getWidth() - width) - 3, -2);
+
+        // Direction arrow, ported from Create's TrainHUD.
+        AllGuiTextures.TRAIN_HUD_DIRECTION.render(graphics, 77, -20);
+        Entity cameraEntity = minecraft.getCameraEntity();
+        if (cameraEntity != null) {
+            boolean reversing = PRESSED.contains(1);
+            boolean arrowInverted = inverted ^ reversing;
+            int angleOffset = (PRESSED.contains(2) ? -45 : 0) + (PRESSED.contains(3) ? 45 : 0);
+            if (reversing) {
+                angleOffset *= -1;
+            }
+
+            float snapSize = 22.5f;
+            float diff = AngleHelper.getShortestAngleDiff(cameraEntity.getYRot(), trainYaw)
+                    + (arrowInverted ? -90 : 90);
+            if (Math.abs(diff) < 60) {
+                diff = 0;
+            }
+
+            float angle = diff + angleOffset;
+            float snappedAngle = (snapSize * Math.round(angle / snapSize)) % 360f;
+
+            graphics.pose().pushPose();
+            graphics.pose().translate(91, -9, 0);
+            graphics.pose().scale(0.925f, 0.925f, 1);
+            PlacementClient.textured(graphics.pose(), 0, 0, 1, snappedAngle);
+            graphics.pose().popPose();
+        }
+
+        // While derailed the controls remain open, but the HUD shows a wrench hint instead
+        // of the old chat message.
+        if (derailed) {
+            graphics.pose().pushPose();
+            graphics.pose().translate(0, 0, 200);
+            graphics.renderItem(new ItemStack(AllItems.WRENCH.get()), 91 - 8, -45);
+            graphics.pose().popPose();
+        }
 
         graphics.pose().popPose();
     }

@@ -4,6 +4,7 @@ import com.google.common.base.Strings;
 import com.simibubi.create.Create;
 import com.simibubi.create.content.contraptions.actors.trainControls.ControlsBlock;
 import com.simibubi.create.content.trains.TrainHUDUpdatePacket;
+import com.simibubi.create.content.trains.entity.Carriage;
 import com.simibubi.create.content.trains.entity.Navigation;
 import com.simibubi.create.content.trains.entity.Train;
 import com.simibubi.create.content.trains.entity.TravellingPoint.SteerDirection;
@@ -96,13 +97,6 @@ public final class SableTrainControlManager {
                     data.trainId(), plotPos);
             return false;
         }
-        if (train.derailed) {
-            player.displayClientMessage(Component.literal(
-                    "Поезд сошёл с рельсов — разберите его на станции или очистите командой /sablenautics purge_trains"),
-                    true);
-            LOGGER.info("Sablenautics: train {} is derailed, controls refused", train.id);
-            return false;
-        }
         if (data.carriageIndex() < 0 || data.carriageIndex() >= train.carriages.size()) {
             LOGGER.debug("Sablenautics: invalid carriage index {} for train {}", data.carriageIndex(), train.id);
             return false;
@@ -151,6 +145,8 @@ public final class SableTrainControlManager {
         PLAYER_TRAIN.put(player.getUUID(), train.id);
 
         SablenauticsNetwork.sendStartControl(player, train.id, data.carriageIndex(), inverted);
+        SablenauticsNetwork.sendControlStatus(player, train.id, train.derailed,
+                SableTrainController.carriageYaw(level, train.carriages.get(data.carriageIndex())));
         LOGGER.info("Sablenautics: {} started controlling train {} via sublevel {}",
                 player.getGameProfile().getName(), train.id, data.subLevel().getUniqueId());
         return true;
@@ -203,15 +199,25 @@ public final class SableTrainControlManager {
 
     private static boolean control(Session session, ServerPlayer player, Train train, long now) {
         if (player.isSpectator()) return false;
-        if (train.derailed) return false;
         if (session.subLevel.isRemoved()) return false;
         Vec3 controlsWorld = SableTrainController.plotBlockCenter(session.subLevel, session.plotPos);
-        if (player.position().distanceToSqr(controlsWorld) > 16 * 16) return false;
+        if (!train.derailed && player.position().distanceToSqr(controlsWorld) > 16 * 16) return false;
         if (session.pressed(5)) return false;
+
+        if (session.carriageIndex < 0 || session.carriageIndex >= train.carriages.size()) return false;
+        Carriage carriage = train.carriages.get(session.carriageIndex);
 
         if (session.hudCooldown-- <= 0) {
             CatnipServices.NETWORK.sendToClient(player, new TrainHUDUpdatePacket.Clientbound(train));
+            SablenauticsNetwork.sendControlStatus(player, train.id, train.derailed,
+                    SableTrainController.carriageYaw(player.serverLevel(), carriage));
             session.hudCooldown = HUD_INTERVAL;
+        }
+
+        // Staying at the controls is intentional: the HUD switches to the wrench hint and
+        // the player can move the train back onto rails without being ejected.
+        if (train.derailed) {
+            return true;
         }
 
         int targetSpeed = (session.pressed(0) ? 1 : 0) - (session.pressed(1) ? 1 : 0);
@@ -285,7 +291,6 @@ public final class SableTrainControlManager {
         double topSpeed = train.maxSpeed() * AllConfigs.server().trains.manualTrainSpeedModifier.getF();
         double cappedTopSpeed = topSpeed * train.throttle;
 
-        var carriage = train.carriages.get(session.carriageIndex);
         if (carriage.getLeadingPoint().edge != null && carriage.getLeadingPoint().edge.isTurn()
                 || carriage.getTrailingPoint().edge != null && carriage.getTrailingPoint().edge.isTurn()) {
             topSpeed = train.maxTurnSpeed();

@@ -1,5 +1,11 @@
 {
   "block.sablenautics.physics_sticker": "Физический стикер",
   "block.sablenautics.sable_bogey": "Sable Bogey",
-  "bogey.sablenautics.sable_bogey": "Sable Bogey"
+  "bogey.sablenautics.sable_bogey": "Sable Bogey",
+  "sablenautics.relocate.selected": "Выбран поезд %s. Нажмите галочкой на рельсы, чтобы переместить его туда.",
+  "sablenautics.relocate.success": "Поезд %s перемещён на рельсы.",
+  "sablenautics.relocate.invalid": "Сюда поезд поставить нельзя: путь заблокирован или не хватает места.",
+  "sablenautics.relocate.cancelled": "Перемещение поезда отменено.",
+  "sablenautics.relocate.no_train": "Этот поезд больше не существует.",
+  "sablenautics.relocate.too_far": "Вы слишком далеко от этих рельсов."
 }

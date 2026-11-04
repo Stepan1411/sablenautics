@@ -1,5 +1,11 @@
 {
   "block.sablenautics.physics_sticker": "Physics Sticker",
   "block.sablenautics.sable_bogey": "Sable Bogey",
-  "bogey.sablenautics.sable_bogey": "Sable Bogey"
+  "bogey.sablenautics.sable_bogey": "Sable Bogey",
+  "sablenautics.relocate.selected": "Selected train %s. Right-click a rail with the wrench to move it here.",
+  "sablenautics.relocate.success": "Train %s moved onto the rail.",
+  "sablenautics.relocate.invalid": "Cannot place the train here: the track is blocked or has no room.",
+  "sablenautics.relocate.cancelled": "Train relocation cancelled.",
+  "sablenautics.relocate.no_train": "That train no longer exists.",
+  "sablenautics.relocate.too_far": "You are too far away from that rail."
 }

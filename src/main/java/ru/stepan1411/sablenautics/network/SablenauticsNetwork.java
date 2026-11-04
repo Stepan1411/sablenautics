@@ -23,6 +23,12 @@ public final class SablenauticsNetwork {
                                 ClientSableTrainControls.start(payload);
                             }
                         }))
+                .playToClient(TrainControlStatusPayload.TYPE, TrainControlStatusPayload.STREAM_CODEC,
+                        (payload, context) -> context.enqueueWork(() -> {
+                            if (FMLEnvironment.dist == Dist.CLIENT) {
+                                ClientSableTrainControls.applyStatus(payload);
+                            }
+                        }))
                 .playToServer(TrainControlInputPayload.TYPE, TrainControlInputPayload.STREAM_CODEC,
                         (payload, context) -> context.enqueueWork(() -> {
                             if (context.player() instanceof ServerPlayer player) {
@@ -42,6 +48,11 @@ public final class SablenauticsNetwork {
     public static void sendStartControl(ServerPlayer player, UUID trainId, int carriageIndex, boolean inverted) {
         PacketDistributor.sendToPlayer(player,
                 new TrainControlStartPayload(trainId, carriageIndex, inverted));
+    }
+
+    public static void sendControlStatus(ServerPlayer player, UUID trainId, boolean derailed, float yaw) {
+        PacketDistributor.sendToPlayer(player,
+                new TrainControlStatusPayload(trainId, derailed, yaw));
     }
 
     public static void sendStopControl(ServerPlayer player, UUID trainId) {
