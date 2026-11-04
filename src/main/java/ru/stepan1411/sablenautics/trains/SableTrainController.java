@@ -1505,7 +1505,7 @@ public final class SableTrainController {
             if (!data.trainId().equals(train.id) || !data.detached) continue;
             if (data.subLevel().isRemoved()) continue;
             found = true;
-            if (data.subLevel().latestLinearVelocity.lengthSquared() > 0.04) {
+            if (data.subLevel().latestLinearVelocity.lengthSquared() > 0.25) {
                 return false;
             }
         }
