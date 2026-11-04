@@ -196,12 +196,6 @@ public final class SableTrainController {
     private static final double MAX_TARGET_STEP = 4.0;
 
     /**
-     * How far a carriage may be pushed along the track before it is considered torn off.
-     * Lateral/vertical offsets still use {@link #DETACH_DISTANCE}: a train may roll along
-     * its rails, but it must not drift sideways off them.
-     */
-    private static final double MAX_LONGITUDINAL_OFFSET = 6.0;
-    /**
      * While nobody drives, the body that was actually pushed is not held along the track at
      * all; it only has rolling resistance. The remaining carriages follow it through a
      * critically damped spring (see {@link #FREE_ROLL_DAMPING}).
@@ -224,6 +218,8 @@ public final class SableTrainController {
     private static final double WALL_BRAKE_ACCELERATION = 20.0;
     /** Ticks a wall hit is remembered, so the logical train also stops between carriages' ticks. */
     private static final int WALL_BLOCKED_MEMORY_TICKS = 2;
+    /** How long a newly docked train is held still before external forces may move it again. */
+    private static final int DOCKED_SETTLE_TICKS = 10;
 
     /** Body sub-level UUID -> carriage data. */
     private static final Map<UUID, SubLevelData> SUBLEVELS = new HashMap<>();
@@ -241,6 +237,8 @@ public final class SableTrainController {
     private static final Map<UUID, Double> DETACHED_TRAIN_SPEED = new HashMap<>();
     /** Last game tick at which a carriage of the train hit a solid block ahead. */
     private static final Map<UUID, Long> BLOCKED_TRAINS = new HashMap<>();
+    /** Game tick until which a freshly docked train is held still. */
+    private static final Map<UUID, Long> DOCKED_UNTIL = new HashMap<>();
 
     /**
      * Mutable state of one carriage. Accessor method names intentionally match the old
@@ -519,6 +517,12 @@ public final class SableTrainController {
         Vec3 anchor = dce.positionAnchor;
         Quaterniond targetOrientation = computeTargetOrientation(dce, pose, data.initialYaw());
         Vector3d targetPosition = computeTargetPosition(serverSubLevel, anchor, targetOrientation);
+        if (!isFinite(targetPosition) || !isFinite(targetOrientation)) {
+            LOGGER.warn("Sablenautics: carriage {} of train {} has an invalid rail target ({} / {})",
+                    data.carriageIndex(), train.id, targetPosition, targetOrientation);
+            syncBogieBlocks(serverSubLevel, data);
+            return;
+        }
         double targetStep = data.hasTarget ? targetPosition.distance(data.lastTargetPosition) : 0.0;
 
         updateTargetVelocity(data, targetPosition, targetOrientation, serverLevel);
@@ -1002,6 +1006,17 @@ public final class SableTrainController {
             blockingIndex.increment();
         });
 
+        // A relocation that collapses the whole train onto one point must never be applied:
+        // it would teleport every carriage into the same spot and derail the train.
+        if (train.carriages.size() > 1 && recordedVecs.size() >= 2) {
+            Vec3 first = recordedVecs.get(0);
+            Vec3 last = recordedVecs.get(recordedVecs.size() - 1);
+            if (first.distanceToSqr(last) < 0.0625) {
+                LOGGER.warn("Sablenautics: refusing collapsed layout for train {}", train.id);
+                return false;
+            }
+        }
+
         // Check collisions against trains on the *target* graph, not the graph the train is
         // currently on. Create's own relocator checks against the old graph, which misses
         // occupied rails when the train is moved to a separate track network.
@@ -1271,6 +1286,18 @@ public final class SableTrainController {
             maxAngle = Math.max(maxAngle, orientationAngle(pose.orientation(), orientation));
         }
 
+        if (targets.size() > 1) {
+            double maxDistanceSq = 0.0;
+            Vector3d firstTarget = targets.get(0);
+            for (Vector3d target : targets) {
+                maxDistanceSq = Math.max(maxDistanceSq, target.distanceSquared(firstTarget));
+            }
+            if (maxDistanceSq < 0.0625) {
+                LOGGER.warn("Sablenautics: refusing collapsed attachment layout for train {}", train.id);
+                return false;
+            }
+        }
+
         boolean closeEnough = maxError <= AUTO_ATTACH_DISTANCE && maxAngle <= AUTO_ATTACH_ANGLE;
         if (!closeEnough && !allowApproach) {
             LOGGER.debug("Sablenautics: auto-attach rejected for train {} (error {}, angle {})",
@@ -1440,6 +1467,7 @@ public final class SableTrainController {
         Vector3d target = data.attachTargetPosition;
         Quaterniond targetOrientation = data.attachTargetOrientation;
         if (target == null || targetOrientation == null) return;
+        if (!isFinite(target) || !isFinite(targetOrientation)) return;
 
         double mass = subLevel.getMassTracker().getMass();
         if (mass <= 0) return;
@@ -1681,8 +1709,9 @@ public final class SableTrainController {
         Vector3d acceleration;
         Train train = Create.RAILWAYS.trains.get(data.trainId());
         ServerLevel level = subLevel.getLevel();
-        boolean wallBlocked = level != null && isWallBlocked(data.trainId(), level.getGameTime());
-        boolean freeRolling = isFreeRolling(train) || wallBlocked;
+        long now = level != null ? level.getGameTime() : 0L;
+        boolean wallBlocked = level != null && isWallBlocked(data.trainId(), now);
+        boolean freeRolling = isFreeRolling(train, now) || wallBlocked;
         Vec3 forward = freeRolling ? railForward(train, data) : Vec3.ZERO;
         boolean hasAxis = forward.lengthSqr() > 1.0e-8;
 
@@ -1731,6 +1760,11 @@ public final class SableTrainController {
         // Cancel gravity so the suspension only has to track the rail target.
         Vector3d gravity = DimensionPhysicsData.getGravity(subLevel.getLevel(), pose.position(), new Vector3d());
         acceleration.sub(gravity);
+
+        if (!Double.isFinite(acceleration.x) || !Double.isFinite(acceleration.y)
+                || !Double.isFinite(acceleration.z)) {
+            return;
+        }
 
         double dt = Math.max(timeStep, 1.0 / 20.0 / 8.0);
         Vector3d impulseWorld = new Vector3d(acceleration).mul(mass * dt);
@@ -1819,9 +1853,9 @@ public final class SableTrainController {
     }
 
     /**
-     * A carriage that was pushed sideways or vertically off its rail target still tears the
-     * whole train off the rails. A carriage that is only further along the track is fine:
-     * that is exactly what happens when another object pushes the train forward.
+     * A carriage that was pushed sideways or vertically off its rail target tears the whole
+     * train off the rails. Being further along the track is fine: that is exactly what
+     * happens when another object pushes the train forward.
      */
     private static boolean isTornOff(Train train, SubLevelData data, Pose3d pose,
                                      Vector3d targetPosition, double bodyError) {
@@ -1836,8 +1870,7 @@ public final class SableTrainController {
         Vector3d axis = new Vector3d(forward.x, forward.y, forward.z).normalize();
         double along = offset.dot(axis);
         double lateralSq = Math.max(0.0, offset.lengthSquared() - along * along);
-        return lateralSq > DETACH_DISTANCE * DETACH_DISTANCE
-                || Math.abs(along) > MAX_LONGITUDINAL_OFFSET;
+        return lateralSq > DETACH_DISTANCE * DETACH_DISTANCE;
     }
 
     /**
@@ -1943,10 +1976,12 @@ public final class SableTrainController {
     private static void updatePhysicsDrivenSpeed(Train train, SubLevelData data, ServerLevel level) {
         if (!isAutoAttachLeader(train, data)) return;
 
+        long now = level.getGameTime();
+
         // A train that ran into terrain must stay stopped, and its spring must not keep
         // pushing it through the obstacle. Keep targetSpeed so reverse input can still be
         // used to back away from the wall.
-        if (isWallBlocked(train.id, level.getGameTime())) {
+        if (isWallBlocked(train.id, now)) {
             train.speed = 0.0;
             train.speedBeforeStall = null;
             for (SubLevelData other : SUBLEVELS.values()) {
@@ -1957,21 +1992,26 @@ public final class SableTrainController {
             return;
         }
 
-        // A docked train must stay parked. Without this, residual momentum of its physical
-        // bodies would immediately feed back into Create's logical speed and the train would
-        // silently leave the station right after arriving.
-        if (train.getCurrentStation() != null && train.targetSpeed == 0.0) {
-            train.speed = 0.0;
-            train.speedBeforeStall = null;
-            for (SubLevelData other : SUBLEVELS.values()) {
-                if (other.trainId().equals(train.id)) {
-                    other.physicsDriver = false;
+        // A freshly docked train is held still for a moment so residual momentum cannot make
+        // it creep out of the station. Once it is at rest it can be moved by external forces.
+        if (train.getCurrentStation() != null) {
+            DOCKED_UNTIL.putIfAbsent(train.id, now + DOCKED_SETTLE_TICKS);
+            long holdUntil = DOCKED_UNTIL.getOrDefault(train.id, now);
+            if (train.targetSpeed == 0.0 && now < holdUntil) {
+                train.speed = 0.0;
+                train.speedBeforeStall = null;
+                for (SubLevelData other : SUBLEVELS.values()) {
+                    if (other.trainId().equals(train.id)) {
+                        other.physicsDriver = false;
+                    }
                 }
+                return;
             }
-            return;
+        } else {
+            DOCKED_UNTIL.remove(train.id);
         }
 
-        if (!isFreeRolling(train)) return;
+        if (!isFreeRolling(train, now)) return;
 
         double bestSpeed = 0.0;
         for (SubLevelData other : SUBLEVELS.values()) {
@@ -2084,18 +2124,22 @@ public final class SableTrainController {
                 .add(pose.position());
 
         Vector3d axis = new Vector3d(forward.x, forward.y, forward.z).normalize();
-        return new Vector3d(bodyAnchor)
+        double result = new Vector3d(bodyAnchor)
                 .sub(new Vector3d(dce.positionAnchor.x, dce.positionAnchor.y, dce.positionAnchor.z))
                 .dot(axis);
+        return Double.isFinite(result) ? result : 0.0;
     }
 
     /**
      * @return true when no player or schedule is currently driving the train, so physical
      *         pushes are allowed to roll it along the rails
      */
-    private static boolean isFreeRolling(Train train) {
+    private static boolean isFreeRolling(Train train, long gameTime) {
         if (train == null || train.derailed || train.graph == null) return false;
-        if (train.getCurrentStation() != null) return false;
+        if (train.getCurrentStation() != null) {
+            Long until = DOCKED_UNTIL.get(train.id);
+            if (until == null || gameTime < until) return false;
+        }
         if (train.targetSpeed != 0.0) return false;
         if (train.navigation.destination != null) return false;
         return train.speedBeforeStall == null;
@@ -2409,6 +2453,32 @@ public final class SableTrainController {
         ensureMappings(train);
         linkNeighbours(train);
 
+        // Guard against a corrupted logical layout: if every carriage anchor ended up in
+        // the same spot, teleporting would collapse the whole train into one point.
+        if (train.carriages.size() > 1) {
+            Vec3 firstAnchor = null;
+            double maxDistanceSq = 0.0;
+            for (int index = 0; index < train.carriages.size(); index++) {
+                Carriage carriage = train.carriages.get(index);
+                ServerSubLevel body = subLevelFor(train, index);
+                if (body == null || body.getLevel() == null) continue;
+
+                carriage.updateContraptionAnchors();
+                DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(body.getLevel().dimension());
+                if (dce == null || dce.positionAnchor == null) continue;
+
+                if (firstAnchor == null) {
+                    firstAnchor = dce.positionAnchor;
+                } else {
+                    maxDistanceSq = Math.max(maxDistanceSq, dce.positionAnchor.distanceToSqr(firstAnchor));
+                }
+            }
+            if (firstAnchor != null && maxDistanceSq < 0.25) {
+                LOGGER.warn("Sablenautics: refusing to teleport collapsed train {}", train.id);
+                return 0;
+            }
+        }
+
         int moved = 0;
         for (int index = 0; index < train.carriages.size(); index++) {
             Carriage carriage = train.carriages.get(index);
@@ -2435,6 +2505,11 @@ public final class SableTrainController {
 
             Quaterniond orientation = computeTargetOrientation(dce, body.logicalPose(), data.initialYaw());
             Vector3d targetPosition = computeTargetPosition(body, dce.positionAnchor, orientation);
+            if (!isFinite(targetPosition) || !isFinite(orientation)) {
+                LOGGER.warn("Sablenautics: refusing invalid rail target for train {} carriage {}",
+                        train.id, index);
+                continue;
+            }
 
             if (pipeline != null) {
                 teleport(body, targetPosition, orientation, pipeline);
@@ -2478,6 +2553,28 @@ public final class SableTrainController {
 
     private static void teleport(ServerSubLevel subLevel, Vector3d position, Quaterniond orientation,
                                  PhysicsPipeline pipeline) {
+        if (!isFinite(position) || !isFinite(orientation)) {
+            LOGGER.warn("Sablenautics: refusing to teleport sublevel {} to an invalid rail target {} {}",
+                    subLevel.getUniqueId(), position, orientation);
+            return;
+        }
+
+        // Never teleport another carriage of the same train onto a spot that is already
+        // occupied by one of its neighbours. A collapsed target would otherwise stack the
+        // whole train in one point.
+        SubLevelData data = SUBLEVELS.get(subLevel.getUniqueId());
+        if (data != null) {
+            for (SubLevelData other : SUBLEVELS.values()) {
+                if (other == data || !other.trainId().equals(data.trainId())) continue;
+                if (other.subLevel().isRemoved()) continue;
+                if (other.subLevel().logicalPose().position().distanceSquared(position) < 0.25) {
+                    LOGGER.warn("Sablenautics: refusing to teleport carriage {} of train {} onto carriage {}",
+                            data.carriageIndex(), data.trainId(), other.carriageIndex());
+                    return;
+                }
+            }
+        }
+
         Pose3d pose = subLevel.logicalPose();
         Vector3dc centerOfMass = subLevel.getMassTracker().getCenterOfMass();
         if (centerOfMass != null) {
@@ -2490,6 +2587,15 @@ public final class SableTrainController {
         pipeline.resetVelocity(subLevel);
         subLevel.latestLinearVelocity.zero();
         subLevel.latestAngularVelocity.zero();
+    }
+
+    private static boolean isFinite(Vector3dc vector) {
+        return Double.isFinite(vector.x()) && Double.isFinite(vector.y()) && Double.isFinite(vector.z());
+    }
+
+    private static boolean isFinite(Quaterniondc quaternion) {
+        return Double.isFinite(quaternion.x()) && Double.isFinite(quaternion.y())
+                && Double.isFinite(quaternion.z()) && Double.isFinite(quaternion.w());
     }
 
     /**
@@ -3085,6 +3191,7 @@ public final class SableTrainController {
         DETACHED_GRAPHS.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         DETACHED_TRAIN_SPEED.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         BLOCKED_TRAINS.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
+        DOCKED_UNTIL.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
     }
 
     private static int countLiveBodies(Train train) {
@@ -3343,5 +3450,6 @@ public final class SableTrainController {
         DETACHED_GRAPHS.clear();
         DETACHED_TRAIN_SPEED.clear();
         BLOCKED_TRAINS.clear();
+        DOCKED_UNTIL.clear();
     }
 }
