@@ -443,6 +443,12 @@ public final class SableTrainController {
         if (train == null) return;
         if (data.carriageIndex() < 0 || data.carriageIndex() >= train.carriages.size()) return;
 
+        // A sleeping body does not receive physics sub-steps, so keep it awake while it is
+        // being pulled towards the rails.
+        if (data.attachTargetPosition != null) {
+            wakeUp(serverSubLevel);
+        }
+
         if (!LINKED_TRAINS.containsKey(train.id)) {
             ensureMappings(train);
             linkNeighbours(train);
@@ -1441,6 +1447,17 @@ public final class SableTrainController {
         train.targetSpeed = 0;
         train.derailed = true;
         LOGGER.info("Sablenautics: train {} is being smoothly pulled onto the track", train.id);
+    }
+
+    /** Keeps a sub-level awake in Sable's physics pipeline. */
+    private static void wakeUp(ServerSubLevel body) {
+        ServerLevel level = body.getLevel();
+        if (level == null) return;
+        SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(level);
+        PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
+        if (pipeline != null) {
+            pipeline.wakeUp(body);
+        }
     }
 
     /** Abandons a smooth approach and lets the auto-attach scan try a new target. */
