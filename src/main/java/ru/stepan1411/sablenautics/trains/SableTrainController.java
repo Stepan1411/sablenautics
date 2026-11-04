@@ -489,7 +489,7 @@ public final class SableTrainController {
 
                 // If the player grabbed the train with a staff and is dragging it away from
                 // the approach target, stop pulling it back to the old rails.
-                if (velocity.lengthSquared() > 4.0
+                if (velocity.lengthSquared() > 0.25
                         && awayFromTarget.dot(new Vector3d(velocity.x(), velocity.y(), velocity.z())) > 0.0) {
                     cancelApproach(train, now + AUTO_ATTACH_RETRY_TICKS);
                 } else if (data.attachStartTick >= 0
@@ -523,9 +523,17 @@ public final class SableTrainController {
 
             suspendCarriagePoints(train, data);
             data.hasTarget = false;
-            if (isAutoAttachLeader(train, data) && isTrainAtRest(train)) {
-                if (!tryAttachToSavedTrack(train, serverLevel, data)) {
-                    tryAttachToNearbyTrack(serverSubLevel, serverLevel, train, data);
+            if (isAutoAttachLeader(train, data)) {
+                if (isTrainAtRest(train)) {
+                    // Prefer the track the train is actually lying next to. The saved track
+                    // path is only a refinement for small bumps and must not block the
+                    // nearby-track scan (its failure used to set a retry timer first).
+                    if (!tryAttachToNearbyTrack(serverSubLevel, serverLevel, train, data)) {
+                        tryAttachToSavedTrack(train, serverLevel, data);
+                    }
+                } else if (serverLevel.getGameTime() % 20 == 0) {
+                    LOGGER.info("Sablenautics: detached train {} is still moving, waiting to re-attach",
+                            train.id);
                 }
             }
             syncBogieBlocks(serverSubLevel, data);
@@ -1321,7 +1329,7 @@ public final class SableTrainController {
         }
 
         if (candidates.isEmpty()) {
-            LOGGER.debug("Sablenautics: no track candidates for train {} near {}",
+            LOGGER.info("Sablenautics: no track candidates for train {} near {}",
                     train.id, body.logicalPose().position());
             return false;
         }
@@ -1505,7 +1513,7 @@ public final class SableTrainController {
             if (!data.trainId().equals(train.id) || !data.detached) continue;
             if (data.subLevel().isRemoved()) continue;
             found = true;
-            if (data.subLevel().latestLinearVelocity.lengthSquared() > 0.25) {
+            if (data.subLevel().latestLinearVelocity.lengthSquared() > 1.0) {
                 return false;
             }
         }
