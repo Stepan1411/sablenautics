@@ -483,7 +483,17 @@ public final class SableTrainController {
         if (data.detached) {
             if (data.attachTargetPosition != null) {
                 long now = serverLevel.getGameTime();
-                if (data.attachStartTick >= 0 && now - data.attachStartTick > APPROACH_TIMEOUT_TICKS) {
+                Vector3dc velocity = serverSubLevel.latestLinearVelocity;
+                Vector3d awayFromTarget = new Vector3d(serverSubLevel.logicalPose().position())
+                        .sub(data.attachTargetPosition);
+
+                // If the player grabbed the train with a staff and is dragging it away from
+                // the approach target, stop pulling it back to the old rails.
+                if (velocity.lengthSquared() > 4.0
+                        && awayFromTarget.dot(new Vector3d(velocity.x(), velocity.y(), velocity.z())) > 0.0) {
+                    cancelApproach(train, now + AUTO_ATTACH_RETRY_TICKS);
+                } else if (data.attachStartTick >= 0
+                        && now - data.attachStartTick > APPROACH_TIMEOUT_TICKS) {
                     // The smooth approach could not reach the rails. Snap the body onto the
                     // target at a safe point in the tick instead of leaving the train
                     // detached forever.
@@ -503,15 +513,17 @@ public final class SableTrainController {
                     }
                 }
 
-                // Smooth attachment is being driven by prePhysicsTick; keep the restored
-                // travelling points and do not start yet another relocation.
-                syncBogieBlocks(serverSubLevel, data);
-                return;
+                if (data.attachTargetPosition != null) {
+                    // Smooth attachment is being driven by prePhysicsTick; keep the restored
+                    // travelling points and do not start yet another relocation.
+                    syncBogieBlocks(serverSubLevel, data);
+                    return;
+                }
             }
 
             suspendCarriagePoints(train, data);
             data.hasTarget = false;
-            if (isAutoAttachLeader(train, data)) {
+            if (isAutoAttachLeader(train, data) && isTrainAtRest(train)) {
                 if (!tryAttachToSavedTrack(train, serverLevel, data)) {
                     tryAttachToNearbyTrack(serverSubLevel, serverLevel, train, data);
                 }
@@ -1470,6 +1482,34 @@ public final class SableTrainController {
         train.targetSpeed = 0;
         train.derailed = true;
         LOGGER.info("Sablenautics: train {} is being smoothly pulled onto the track", train.id);
+    }
+
+    /** Abandons a smooth approach and lets the auto-attach scan try a new target. */
+    private static void cancelApproach(Train train, long nextAttemptTick) {
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id)) continue;
+            data.attachTargetPosition = null;
+            data.attachTargetOrientation = null;
+            data.attachStartTick = -1L;
+            data.hasTarget = false;
+            data.nextAttachAttemptTick = nextAttemptTick;
+        }
+    }
+
+    /**
+     * @return true when every detached carriage is slow enough to be placed on rails
+     */
+    private static boolean isTrainAtRest(Train train) {
+        boolean found = false;
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id) || !data.detached) continue;
+            if (data.subLevel().isRemoved()) continue;
+            found = true;
+            if (data.subLevel().latestLinearVelocity.lengthSquared() > 0.04) {
+                return false;
+            }
+        }
+        return found;
     }
 
     /** Keeps a sub-level awake in Sable's physics pipeline. */
