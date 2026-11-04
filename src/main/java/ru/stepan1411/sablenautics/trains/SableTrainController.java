@@ -300,6 +300,8 @@ public final class SableTrainController {
         private boolean autoAttachTrigger = true;
 
         private boolean hasTarget;
+        /** Tick until which a freshly attached carriage is not torn off while its springs settle. */
+        private long attachGraceUntil;
         private final Vector3d targetPosition = new Vector3d();
         private final Quaterniond targetOrientation = new Quaterniond();
         private final Vector3d targetVelocity = new Vector3d();
@@ -480,6 +482,27 @@ public final class SableTrainController {
         // then let one carriage look for a new track for the whole train.
         if (data.detached) {
             if (data.attachTargetPosition != null) {
+                long now = serverLevel.getGameTime();
+                if (data.attachStartTick >= 0 && now - data.attachStartTick > APPROACH_TIMEOUT_TICKS) {
+                    // The smooth approach could not reach the rails. Snap the body onto the
+                    // target at a safe point in the tick instead of leaving the train
+                    // detached forever.
+                    Vector3d target = data.attachTargetPosition;
+                    Quaterniond targetOrientation = data.attachTargetOrientation;
+                    if (isFinite(target) && isFinite(targetOrientation)) {
+                        SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(serverLevel);
+                        PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
+                        if (pipeline != null) {
+                            teleport(serverSubLevel, target, targetOrientation, pipeline);
+                            ensureRailJoint(data, serverSubLevel, pipeline, target, targetOrientation);
+                        }
+                        markAttached(data, serverLevel, target, targetOrientation);
+                        finishTrainAttachment(train);
+                        LOGGER.info("Sablenautics: snapped carriage {} of train {} onto its rail target",
+                                data.carriageIndex(), train.id);
+                    }
+                }
+
                 // Smooth attachment is being driven by prePhysicsTick; keep the restored
                 // travelling points and do not start yet another relocation.
                 syncBogieBlocks(serverSubLevel, data);
@@ -582,7 +605,7 @@ public final class SableTrainController {
         updatePhysicsDrivenSpeed(train, data, serverLevel);
 
         double bodyError = pose.position().distance(targetPosition);
-        if (isTornOff(train, data, pose, targetPosition, bodyError)) {
+        if (isTornOff(train, data, pose, targetPosition, bodyError, serverLevel.getGameTime())) {
             if (targetStep > MAX_TARGET_STEP * 2.0) {
                 // The rail target jumped (relocation / newly loaded anchor). Snap to it
                 // instead of treating the jump as a derailment.
@@ -1460,18 +1483,6 @@ public final class SableTrainController {
         }
     }
 
-    /** Abandons a smooth approach and lets the auto-attach scan try a new target. */
-    private static void cancelApproach(Train train, long nextAttemptTick) {
-        for (SubLevelData data : SUBLEVELS.values()) {
-            if (!data.trainId().equals(train.id)) continue;
-            data.attachTargetPosition = null;
-            data.attachTargetOrientation = null;
-            data.attachStartTick = -1L;
-            data.hasTarget = false;
-            data.nextAttachAttemptTick = nextAttemptTick;
-        }
-    }
-
     private static void markAttached(SubLevelData data, ServerLevel level, Vector3d target,
                                      Quaterniond orientation) {
         data.attachTargetPosition = null;
@@ -1485,6 +1496,7 @@ public final class SableTrainController {
         data.autoAttachTrigger = true;
         data.initialized = true;
         data.hasTarget = true;
+        data.attachGraceUntil = level.getGameTime() + 10;
         data.savedPoints.clear();
         resetTargetTracking(data, target, orientation, level);
         writeDetachedFlag(data);
@@ -1595,10 +1607,6 @@ public final class SableTrainController {
         double distance = diff.length();
         double angle = orientationAngle(pose.orientation(), targetOrientation);
 
-        long now = subLevel.getLevel().getGameTime();
-        boolean timedOut = data.attachStartTick >= 0
-                && now - data.attachStartTick > APPROACH_TIMEOUT_TICKS;
-
         if (distance <= APPROACH_SNAP_DISTANCE && angle <= APPROACH_SNAP_ANGLE) {
             if (pipeline != null) {
                 ensureRailJoint(data, subLevel, pipeline, target, targetOrientation);
@@ -1608,17 +1616,6 @@ public final class SableTrainController {
             Train train = Create.RAILWAYS.trains.get(data.trainId());
             if (train != null) {
                 finishTrainAttachment(train);
-            }
-            return;
-        }
-
-        if (timedOut) {
-            // Do not attach a body that is still far from the rail: the suspension would
-            // immediately tear it off again. Abandon this target and let the auto-attach
-            // scan pick a better one.
-            Train train = Create.RAILWAYS.trains.get(data.trainId());
-            if (train != null) {
-                cancelApproach(train, now + AUTO_ATTACH_RETRY_TICKS);
             }
             return;
         }
@@ -1985,7 +1982,8 @@ public final class SableTrainController {
      * happens when another object pushes the train forward.
      */
     private static boolean isTornOff(Train train, SubLevelData data, Pose3d pose,
-                                     Vector3d targetPosition, double bodyError) {
+                                     Vector3d targetPosition, double bodyError, long now) {
+        if (now < data.attachGraceUntil) return false;
         if (bodyError <= DETACH_DISTANCE) return false;
 
         Vec3 forward = railForward(train, data);
@@ -2659,6 +2657,7 @@ public final class SableTrainController {
             data.autoAttachTrigger = true;
             data.initialized = true;
             data.hasTarget = true;
+            data.attachGraceUntil = level.getGameTime() + 10;
             data.attachTargetPosition = null;
             data.attachTargetOrientation = null;
             data.attachStartTick = -1L;
