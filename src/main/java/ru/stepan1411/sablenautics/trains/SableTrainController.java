@@ -190,6 +190,10 @@ public final class SableTrainController {
     private static final double LINEAR_STIFFNESS = 90.0;
     private static final double LINEAR_DAMPING = 20.0;
     private static final double MAX_LINEAR_ACCELERATION = 120.0;
+    /** Extra lateral/vertical holding while the carriage is on a curve. */
+    private static final double TURN_HOLD_MULTIPLIER = 2.2;
+    /** Curves allow a little more lateral offset before the train is considered torn off. */
+    private static final double TURN_DETACH_MULTIPLIER = 1.5;
     private static final double MAX_TARGET_VELOCITY = 40.0;
     private static final double MAX_TARGET_ANGULAR_VELOCITY = 20.0;
     private static final double MAX_BODY_SPEED = 40.0;
@@ -1850,12 +1854,14 @@ public final class SableTrainController {
         Pose3d pose = subLevel.logicalPose();
         Quaterniond inverseOrientation = new Quaterniond(pose.orientation()).conjugate();
 
-        // Heavier carriages (more blocks) are held more strongly. This keeps short cars
-        // soft enough to tear off while long/heavy cars are noticeably stiffer.
+        // Heavier carriages (more blocks) are held more strongly. Curves get an extra
+        // lateral/vertical hold so sharp turns do not throw the body off the rails.
         double massFactor = Math.max(0.6, Math.min(2.0, Math.sqrt(mass / 200.0)));
-        double stiffness = LINEAR_STIFFNESS * massFactor;
-        double damping = LINEAR_DAMPING * massFactor;
-        double maxAcceleration = MAX_LINEAR_ACCELERATION * massFactor;
+        Train train = Create.RAILWAYS.trains.get(data.trainId());
+        double turnFactor = isOnTurn(train, data) ? TURN_HOLD_MULTIPLIER : 1.0;
+        double stiffness = LINEAR_STIFFNESS * massFactor * turnFactor;
+        double damping = LINEAR_DAMPING * massFactor * Math.sqrt(turnFactor);
+        double maxAcceleration = MAX_LINEAR_ACCELERATION * massFactor * turnFactor;
 
         Vector3d velocity = handle.getLinearVelocity(new Vector3d());
         double speedSquared = velocity.lengthSquared();
@@ -1867,7 +1873,6 @@ public final class SableTrainController {
         }
 
         Vector3d acceleration;
-        Train train = Create.RAILWAYS.trains.get(data.trainId());
         ServerLevel level = subLevel.getLevel();
         long now = level != null ? level.getGameTime() : 0L;
         boolean wallBlocked = level != null && isWallBlocked(data.trainId(), now);
@@ -2013,6 +2018,24 @@ public final class SableTrainController {
     }
 
     /**
+     * @return true when the carriage is currently on a curve or turning quickly enough to
+     *         need extra lateral holding
+     */
+    private static boolean isOnTurn(Train train, SubLevelData data) {
+        if (train == null || train.graph == null) return false;
+        int index = data.carriageIndex();
+        if (index < 0 || index >= train.carriages.size()) return false;
+
+        Carriage carriage = train.carriages.get(index);
+        TravellingPoint leading = carriage.getLeadingPoint();
+        TravellingPoint trailing = carriage.getTrailingPoint();
+        if (leading.edge != null && leading.edge.isTurn()) return true;
+        if (trailing.edge != null && trailing.edge.isTurn()) return true;
+
+        return data.targetAngularVelocity.lengthSquared() > 0.25;
+    }
+
+    /**
      * A carriage that was pushed sideways or vertically off its rail target tears the whole
      * train off the rails. Being further along the track is fine: that is exactly what
      * happens when another object pushes the train forward.
@@ -2020,18 +2043,21 @@ public final class SableTrainController {
     private static boolean isTornOff(Train train, SubLevelData data, Pose3d pose,
                                      Vector3d targetPosition, double bodyError, long now) {
         if (now < data.attachGraceUntil) return false;
-        if (bodyError <= DETACH_DISTANCE) return false;
+
+        double allowedDistance = DETACH_DISTANCE
+                * (isOnTurn(train, data) ? TURN_DETACH_MULTIPLIER : 1.0);
+        if (bodyError <= allowedDistance) return false;
 
         Vec3 forward = railForward(train, data);
         if (forward.lengthSqr() < 1.0e-8) {
-            return bodyError > DETACH_DISTANCE;
+            return bodyError > allowedDistance;
         }
 
         Vector3d offset = new Vector3d(pose.position()).sub(targetPosition);
         Vector3d axis = new Vector3d(forward.x, forward.y, forward.z).normalize();
         double along = offset.dot(axis);
         double lateralSq = Math.max(0.0, offset.lengthSquared() - along * along);
-        return lateralSq > DETACH_DISTANCE * DETACH_DISTANCE;
+        return lateralSq > allowedDistance * allowedDistance;
     }
 
     /**
