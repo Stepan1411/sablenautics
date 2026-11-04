@@ -1846,10 +1846,12 @@ public final class SableTrainController {
         train.speed = Mth.clamp(speedPerTick, -maxSpeed, maxSpeed);
         train.targetSpeed = 0.0;
         train.speedBeforeStall = null;
-        // Keep Create from applying its passive slowdown between two physics measurements.
-        train.manualTick = true;
-        if (train.speed != 0.0 && train.getCurrentStation() != null) {
-            train.leaveStation();
+        if (train.speed != 0.0) {
+            // Keep Create from applying its passive slowdown between two physics measurements.
+            train.manualTick = true;
+            if (train.getCurrentStation() != null) {
+                train.leaveStation();
+            }
         }
     }
 
@@ -1861,8 +1863,7 @@ public final class SableTrainController {
         if (train == null || train.derailed || train.graph == null) return false;
         if (train.targetSpeed != 0.0) return false;
         if (train.navigation.destination != null) return false;
-        if (train.speedBeforeStall != null) return false;
-        return !SableTrainControlManager.isControlled(train.id);
+        return train.speedBeforeStall == null;
     }
 
     private static Quaterniond computeTargetOrientation(DimensionalCarriageEntity dce, Pose3d pose, float initialYaw) {
