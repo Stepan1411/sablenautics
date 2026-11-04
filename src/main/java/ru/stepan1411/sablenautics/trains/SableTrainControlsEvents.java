@@ -43,6 +43,7 @@ public final class SableTrainControlsEvents {
     public static void onServerStopped(ServerStoppedEvent event) {
         SableTrainController.clear();
         SableTrainControlManager.clear();
+        SableTrainRelocation.clear();
         SableCarriageRegistry.clear();
         SableTrainAssembler.clear();
     }

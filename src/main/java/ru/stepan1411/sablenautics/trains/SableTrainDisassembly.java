@@ -33,6 +33,7 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3d;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -100,14 +101,25 @@ public final class SableTrainDisassembly {
         int offset = 1;
         int carriageCount = train.carriages.size();
 
+        // Resolve everything before touching the world. Otherwise a failure halfway through
+        // would leave a train with some of its bodies already purged - a phantom train.
+        ServerSubLevel[] subLevels = new ServerSubLevel[carriageCount];
+        SableTrainController.Alignment[] alignments = new SableTrainController.Alignment[carriageCount];
+        for (int i = 0; i < carriageCount; i++) {
+            ServerSubLevel subLevel = SableTrainController.subLevelFor(train, i);
+            if (subLevel == null || subLevel.getLevel() != level) return false;
+            subLevels[i] = subLevel;
+
+            SableTrainController.Alignment alignment = SableTrainController.alignment(level, train.carriages.get(i));
+            if (alignment == null) return false;
+            alignments[i] = alignment;
+        }
+
         for (int i = 0; i < carriageCount; i++) {
             int carriageIndex = backwards ? carriageCount - 1 - i : i;
             Carriage carriage = train.carriages.get(carriageIndex);
-            ServerSubLevel subLevel = SableTrainController.subLevelFor(train, carriageIndex);
-            if (subLevel == null) return false;
-
-            SableTrainController.Alignment alignment = SableTrainController.alignment(level, carriage);
-            if (alignment == null) return false;
+            ServerSubLevel subLevel = subLevels[carriageIndex];
+            SableTrainController.Alignment alignment = alignments[carriageIndex];
 
             BlockPos target = pos.relative(assemblyDirection,
                             backwards ? offset + carriage.bogeySpacing : offset)
@@ -211,19 +223,19 @@ public final class SableTrainDisassembly {
     }
 
     public static void purgeSubLevel(ServerLevel level, ServerSubLevel subLevel) {
-        BoundingBox3ic bounds = subLevel.getPlot().getBoundingBox();
-        if (bounds == null) return;
-
         // Remove the wheel/body joint before the bodies disappear from the pipeline.
         SableTrainController.forget(subLevel);
 
-        for (int x = bounds.minX(); x <= bounds.maxX(); x++) {
-            for (int y = bounds.minY(); y <= bounds.maxY(); y++) {
-                for (int z = bounds.minZ(); z <= bounds.maxZ(); z++) {
-                    BlockPos plotPos = new BlockPos(x, y, z);
-                    level.removeBlockEntity(plotPos);
-                    if (!level.getBlockState(plotPos).isAir()) {
-                        level.setBlock(plotPos, Blocks.AIR.defaultBlockState(), 0);
+        BoundingBox3ic bounds = subLevel.getPlot().getBoundingBox();
+        if (bounds != null) {
+            for (int x = bounds.minX(); x <= bounds.maxX(); x++) {
+                for (int y = bounds.minY(); y <= bounds.maxY(); y++) {
+                    for (int z = bounds.minZ(); z <= bounds.maxZ(); z++) {
+                        BlockPos plotPos = new BlockPos(x, y, z);
+                        level.removeBlockEntity(plotPos);
+                        if (!level.getBlockState(plotPos).isAir()) {
+                            level.setBlock(plotPos, Blocks.AIR.defaultBlockState(), 0);
+                        }
                     }
                 }
             }

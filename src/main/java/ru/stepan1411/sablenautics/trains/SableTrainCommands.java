@@ -47,6 +47,9 @@ public final class SableTrainCommands {
 
     private static int gotorail(CommandSourceStack source) {
         ServerLevel level = source.getLevel();
+        for (Train train : Create.RAILWAYS.trains.values()) {
+            SableTrainController.ensureMappings(train);
+        }
         Train nearest = nearestTrain(source.getPosition(), level);
         if (nearest == null) {
             source.sendFailure(Component.literal(
@@ -55,10 +58,10 @@ public final class SableTrainCommands {
         }
 
         Vec3 direction = lookDirection(source);
-        Vec3 trackPoint = findTrack(source, level);
+        BlockPos trackBlock = findTrack(source, level);
 
-        if (trackPoint != null) {
-            if (!SableTrainController.relocateToNearestTrack(nearest, level, trackPoint, direction)) {
+        if (trackBlock != null) {
+            if (!SableTrainController.relocateToTrackBlock(nearest, level, trackBlock, direction)) {
                 source.sendFailure(Component.literal(
                         "Sablenautics: could not put the train on that track (not enough room or blocked)"));
                 return 0;
@@ -67,16 +70,33 @@ public final class SableTrainCommands {
             Train train = nearest;
             source.sendSuccess(() -> Component.literal(
                     "Sablenautics: put train \"" + train.name.getString() + "\" on the track at "
-                            + (int) Math.floor(trackPoint.x) + " " + (int) Math.floor(trackPoint.y)
-                            + " " + (int) Math.floor(trackPoint.z)), true);
+                            + trackBlock.getX() + " " + trackBlock.getY() + " " + trackBlock.getZ()), true);
             return train.carriages.size();
         }
 
         int moved = SableTrainController.teleportToRails(nearest);
         if (moved == 0) {
-            source.sendFailure(Component.literal(
-                    "Sablenautics: no track nearby and the train has no loaded Sable carriages"));
-            return 0;
+            // The train may be off the rails or its rail target may no longer be valid.
+            // Look for any track around the train and relocate the whole train onto it.
+            ServerSubLevel body = SableTrainController.subLevelFor(nearest, 0);
+            boolean recovered = false;
+            if (body != null) {
+                var pos = body.logicalPose().position();
+                recovered = SableTrainController.relocateToNearestTrack(nearest, level,
+                        new Vec3(pos.x(), pos.y(), pos.z()), direction, 12.0);
+            }
+
+            if (!recovered) {
+                source.sendFailure(Component.literal(
+                        "Sablenautics: no track nearby and the train has no loaded Sable carriages"));
+                return 0;
+            }
+
+            Train train = nearest;
+            source.sendSuccess(() -> Component.literal(
+                    "Sablenautics: moved train \"" + train.name.getString() + "\" ("
+                            + train.carriages.size() + " carriage(s)) onto the nearest track"), true);
+            return train.carriages.size();
         }
 
         Train train = nearest;
@@ -116,14 +136,15 @@ public final class SableTrainCommands {
     }
 
     /**
-     * @return the exact spot the executor is looking at, or the closest track around them
+     * @return the track block the executor is looking at, or the closest track around them
      */
-    private static @Nullable Vec3 findTrack(CommandSourceStack source, ServerLevel level) {
+    private static @Nullable BlockPos findTrack(CommandSourceStack source, ServerLevel level) {
         Entity entity = source.getEntity();
         if (entity != null) {
             HitResult hit = entity.pick(32.0, 0.0F, false);
-            if (hit instanceof BlockHitResult blockHit) {
-                return blockHit.getLocation();
+            if (hit instanceof BlockHitResult blockHit
+                    && level.getBlockState(blockHit.getBlockPos()).getBlock() instanceof ITrackBlock) {
+                return blockHit.getBlockPos();
             }
         }
 
@@ -141,7 +162,7 @@ public final class SableTrainCommands {
             best = pos.immutable();
         }
 
-        return best == null ? null : Vec3.atCenterOf(best);
+        return best;
     }
 
     private static int purge(CommandSourceStack source, boolean all) {

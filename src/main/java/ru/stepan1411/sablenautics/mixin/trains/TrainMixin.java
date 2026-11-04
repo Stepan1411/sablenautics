@@ -1,32 +1,73 @@
 package ru.stepan1411.sablenautics.mixin.trains;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.simibubi.create.content.trains.entity.Carriage;
 import com.simibubi.create.content.trains.entity.Train;
+import com.simibubi.create.content.trains.entity.TrainMigration;
+import com.simibubi.create.content.trains.graph.DimensionPalette;
+import com.simibubi.create.content.trains.graph.TrackGraph;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import ru.stepan1411.sablenautics.trains.SableTrainAccess;
+import ru.stepan1411.sablenautics.trains.SableTrainController;
 import ru.stepan1411.sablenautics.trains.SableTrainDisassembly;
 import ru.stepan1411.sablenautics.trains.SableTrainSeats;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
 /**
  * Replaces Create's entity-based disassembly checks with Sable sub-level based ones.
+ * <p>
+ * Also marks Sable trains in the train NBT and hides phantom Sable trains (no physical
+ * carriage bodies) from Create's collision scan, so normal trains cannot crash into something
+ * that is not visible in the world.
  */
 @Mixin(value = Train.class, remap = false)
-public abstract class TrainMixin {
+public abstract class TrainMixin implements SableTrainAccess {
 
     @Unique
     private static final Logger SABLENAUTICS_LOGGER = LoggerFactory.getLogger("Sablenautics");
 
     @Unique
     private boolean sablenautics$wasDerailed;
+
+    @Unique
+    private boolean sablenautics$sableTrain;
+
+    @Shadow
+    List<TrainMigration> migratingPoints;
+
+    @Override
+    public boolean sablenautics$isSableTrain() {
+        return sablenautics$sableTrain;
+    }
+
+    @Override
+    public void sablenautics$setSableTrain(boolean sable) {
+        sablenautics$sableTrain = sable;
+    }
+
+    @Override
+    public void sablenautics$clearMigrations() {
+        migratingPoints.clear();
+    }
 
     @Inject(method = "tick", at = @At("TAIL"))
     private void sablenautics$logDerail(Level level, CallbackInfo ci) {
@@ -73,5 +114,46 @@ public abstract class TrainMixin {
         if (count >= 0) {
             cir.setReturnValue(count);
         }
+    }
+
+    @Inject(method = "write", at = @At("TAIL"))
+    private void sablenautics$writeSableFlag(DimensionPalette dimensions, HolderLookup.Provider registries,
+                                             CallbackInfoReturnable<CompoundTag> cir) {
+        if (sablenautics$sableTrain) {
+            cir.getReturnValue().putBoolean(SableTrainController.SABLE_TRAIN_KEY, true);
+        }
+    }
+
+    @Inject(method = "read", at = @At("RETURN"))
+    private static void sablenautics$readSableFlag(CompoundTag tag, HolderLookup.Provider registries,
+                                                   Map<UUID, TrackGraph> trackNetworks, DimensionPalette dimensions,
+                                                   CallbackInfoReturnable<Train> cir) {
+        Train train = cir.getReturnValue();
+        if (train != null && tag.getBoolean(SableTrainController.SABLE_TRAIN_KEY)) {
+            SableTrainController.markSableTrain(train);
+        }
+    }
+
+    /**
+     * Filter the train list used by {@code Train.findCollidingTrain}. Sable trains that are
+     * fully detached or have lost their bodies must not be hit by normal trains.
+     */
+    @WrapOperation(
+            method = "findCollidingTrain",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Ljava/util/Map;values()Ljava/util/Collection;"
+            )
+    )
+    private Collection<Train> sablenautics$filterPhantomTrains(Map<UUID, Train> trains,
+                                                              Operation<Collection<Train>> original) {
+        Collection<Train> all = original.call(trains);
+        List<Train> relevant = new ArrayList<>(all.size());
+        for (Train train : all) {
+            if (SableTrainController.isCollisionRelevant(train)) {
+                relevant.add(train);
+            }
+        }
+        return relevant;
     }
 }

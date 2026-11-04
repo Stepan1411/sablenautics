@@ -14,9 +14,7 @@ import net.neoforged.neoforge.event.tick.ServerTickEvent.Post;
 import ru.stepan1411.sablenautics.Sablenautics;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -36,8 +34,8 @@ public class SableTrainTicker {
 
     private static final String TRAIN_KEY = "sablenautics_train";
 
-    /** Chunk radius around the train to load while moving. */
-    private static final int LOAD_RADIUS = 3;
+    /** Chunk radius around each carriage to load while moving. */
+    private static final int LOAD_RADIUS = 2;
     /** Ticks after which chunk loading stops when the train is stationary (30 seconds). */
     private static final int UNLOAD_AFTER_TICKS = 30 * 20;
 
@@ -76,6 +74,15 @@ public class SableTrainTicker {
             updateTrainChunkLoading(server, train, now);
         }
 
+        // Periodically remove orphan sub-levels and invisible Sable trains before other
+        // trains can collide with them.
+        if (now % 20 == 0) {
+            SableTrainController.validateServer(server);
+        }
+        if (now % 200 == 0) {
+            SableTrainController.discardPhantomEntities(server);
+        }
+
         // Clean up trains that no longer exist
         LAST_MOVE_TICK.keySet().removeIf(uuid -> !Create.RAILWAYS.trains.containsKey(uuid));
     }
@@ -91,31 +98,42 @@ public class SableTrainTicker {
         if (moving) {
             LAST_MOVE_TICK.put(trainId, now);
             loadChunksAroundTrain(server, train);
-        } else {
-            Long lastMove = LAST_MOVE_TICK.get(trainId);
-            if (lastMove != null && now - lastMove > UNLOAD_AFTER_TICKS) {
-                LAST_MOVE_TICK.remove(trainId);
-            }
+            return;
+        }
+
+        Long lastMove = LAST_MOVE_TICK.get(trainId);
+        if (lastMove == null) return;
+
+        if (now - lastMove > UNLOAD_AFTER_TICKS) {
+            LAST_MOVE_TICK.remove(trainId);
+            return;
+        }
+
+        // Keep chunks loaded for a short while after a Sable train derailed so it can settle
+        // and find a nearby track to re-attach to before its bodies leave simulation range.
+        if (train.derailed && SableTrainController.isSableTrain(train)) {
+            loadChunksAroundTrain(server, train);
         }
     }
 
     /**
-     * Loads chunks around the train's current position so it can travel through
-     * unloaded areas without detaching.
+     * Loads chunks around every carriage of the train so long trains can travel through
+     * unloaded areas without their rear carriages lagging behind and tearing off.
      */
     private static void loadChunksAroundTrain(MinecraftServer server, Train train) {
-        var subLevel = SableTrainController.subLevelFor(train, 0);
-        if (subLevel == null || subLevel.isRemoved())
-            return;
+        for (int i = 0; i < train.carriages.size(); i++) {
+            var subLevel = SableTrainController.subLevelFor(train, i);
+            if (subLevel == null || subLevel.isRemoved()) continue;
 
-        ServerLevel level = subLevel.getLevel();
-        var pose = subLevel.logicalPose();
-        int cx = chunkCoord((int) pose.position().x());
-        int cz = chunkCoord((int) pose.position().z());
+            ServerLevel level = subLevel.getLevel();
+            var pose = subLevel.logicalPose();
+            int cx = chunkCoord((int) pose.position().x());
+            int cz = chunkCoord((int) pose.position().z());
 
-        for (int dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; dx++) {
-            for (int dz = -LOAD_RADIUS; dz <= LOAD_RADIUS; dz++) {
-                level.getChunk(cx + dx, cz + dz);
+            for (int dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; dx++) {
+                for (int dz = -LOAD_RADIUS; dz <= LOAD_RADIUS; dz++) {
+                    level.getChunk(cx + dx, cz + dz);
+                }
             }
         }
     }

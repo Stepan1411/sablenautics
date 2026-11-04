@@ -20,6 +20,7 @@ public record BogieInfo(
         Direction.Axis axis,
         boolean upsideDown,
         double wheelRadius,
+        double wheelPointSpacing,
         BlockState originalState
 ) {
 }

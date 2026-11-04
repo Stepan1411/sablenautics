@@ -25,6 +25,7 @@ import org.joml.Vector3d;
 import org.joml.Vector3dc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.stepan1411.sablenautics.content.blocks.SableBogeyBlockEntity;
 import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
 import ru.stepan1411.sablenautics.mixin.trains.ContraptionAccessor;
 
@@ -57,7 +58,7 @@ public class SableTrainAssembler {
 
     private record BogeyCapture(BlockPos globalPos, ResourceLocation styleId, ResourceLocation sizeId,
                                 CompoundTag bogeyData, Direction.Axis axis, boolean upsideDown,
-                                double wheelRadius, BlockState originalState) {
+                                double wheelRadius, double wheelPointSpacing, BlockState originalState) {
     }
 
     /**
@@ -145,9 +146,11 @@ public class SableTrainAssembler {
             return;
         }
 
-        // Hide the wheel blocks inside the carriage with our own Sable bogey block.
+        // Replace the wheel blocks inside the carriage with our own Sable bogey block.
+        // The original style/size/data are copied over, so the block itself keeps rendering
+        // the train's wheel model - no entity is needed.
         for (BogeyCapture capture : bogeyCaptures) {
-            if (hideBogeyBlock(serverLevel, capture.globalPos())) {
+            if (hideBogeyBlock(serverLevel, capture)) {
                 globalPosSet.add(capture.globalPos());
             }
         }
@@ -203,7 +206,7 @@ public class SableTrainAssembler {
                     capture.globalPos().getZ() + 0.5);
             bogies.add(new BogieInfo(localCenter, initialWorld, capture.styleId(), capture.sizeId(),
                     capture.bogeyData(), capture.axis(), capture.upsideDown(), capture.wheelRadius(),
-                    capture.originalState()));
+                    capture.wheelPointSpacing(), capture.originalState()));
         }
 
         // Create's Carriage lists the leading bogey first; the leading bogey is the one
@@ -235,13 +238,14 @@ public class SableTrainAssembler {
                 : Direction.Axis.Z;
 
         return new BogeyCapture(pos, styleId, block.getSize().id(), bogeyData, axis,
-                block.isUpsideDown(state), block.getWheelRadius(), state);
+                block.isUpsideDown(state), block.getWheelRadius(), block.getWheelPointSpacing(), state);
     }
 
     /**
      * @return true if a block should still be moved into the body sub-level
      */
-    private static boolean hideBogeyBlock(ServerLevel level, BlockPos pos) {
+    private static boolean hideBogeyBlock(ServerLevel level, BogeyCapture capture) {
+        BlockPos pos = capture.globalPos();
         BlockState oldState = level.getBlockState(pos);
         if (!(oldState.getBlock() instanceof AbstractBogeyBlock<?>)) return false;
 
@@ -257,6 +261,18 @@ public class SableTrainAssembler {
                     oldState.getValue(BlockStateProperties.WATERLOGGED));
         }
         level.setBlock(pos, invisible, Block.UPDATE_ALL);
+
+        // Carry the original train bogey over to the placeholder block. The block entity
+        // renderer uses this data to draw the same wheel model the carriage had before.
+        if (level.getBlockEntity(pos) instanceof SableBogeyBlockEntity sableBogey) {
+            CompoundTag bogeyData = capture.bogeyData().copy();
+            if (!bogeyData.contains(AbstractBogeyBlockEntity.BOGEY_STYLE_KEY)) {
+                bogeyData.putString(AbstractBogeyBlockEntity.BOGEY_STYLE_KEY,
+                        capture.styleId().toString());
+            }
+            sableBogey.setBogeyData(bogeyData);
+            sableBogey.setRenderSize(capture.sizeId());
+        }
         return true;
     }
 
