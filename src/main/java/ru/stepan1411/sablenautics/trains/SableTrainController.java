@@ -1838,6 +1838,21 @@ public final class SableTrainController {
      */
     private static void updatePhysicsDrivenSpeed(Train train, SubLevelData data) {
         if (!isAutoAttachLeader(train, data)) return;
+
+        // A docked train must stay parked. Without this, residual momentum of its physical
+        // bodies would immediately feed back into Create's logical speed and the train would
+        // silently leave the station right after arriving.
+        if (train.getCurrentStation() != null && train.targetSpeed == 0.0) {
+            train.speed = 0.0;
+            train.speedBeforeStall = null;
+            for (SubLevelData other : SUBLEVELS.values()) {
+                if (other.trainId().equals(train.id)) {
+                    other.physicsDriver = false;
+                }
+            }
+            return;
+        }
+
         if (!isFreeRolling(train)) return;
 
         double bestSpeed = 0.0;
@@ -1916,9 +1931,6 @@ public final class SableTrainController {
         if (train.speed != 0.0) {
             // Keep Create from applying its passive slowdown between two physics measurements.
             train.manualTick = true;
-            if (train.getCurrentStation() != null) {
-                train.leaveStation();
-            }
         }
     }
 
@@ -1965,6 +1977,7 @@ public final class SableTrainController {
      */
     private static boolean isFreeRolling(Train train) {
         if (train == null || train.derailed || train.graph == null) return false;
+        if (train.getCurrentStation() != null) return false;
         if (train.targetSpeed != 0.0) return false;
         if (train.navigation.destination != null) return false;
         return train.speedBeforeStall == null;
