@@ -2559,22 +2559,6 @@ public final class SableTrainController {
             return;
         }
 
-        // Never teleport another carriage of the same train onto a spot that is already
-        // occupied by one of its neighbours. A collapsed target would otherwise stack the
-        // whole train in one point.
-        SubLevelData data = SUBLEVELS.get(subLevel.getUniqueId());
-        if (data != null) {
-            for (SubLevelData other : SUBLEVELS.values()) {
-                if (other == data || !other.trainId().equals(data.trainId())) continue;
-                if (other.subLevel().isRemoved()) continue;
-                if (other.subLevel().logicalPose().position().distanceSquared(position) < 0.25) {
-                    LOGGER.warn("Sablenautics: refusing to teleport carriage {} of train {} onto carriage {}",
-                            data.carriageIndex(), data.trainId(), other.carriageIndex());
-                    return;
-                }
-            }
-        }
-
         Pose3d pose = subLevel.logicalPose();
         Vector3dc centerOfMass = subLevel.getMassTracker().getCenterOfMass();
         if (centerOfMass != null) {
