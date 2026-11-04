@@ -1329,8 +1329,10 @@ public final class SableTrainController {
         }
 
         if (candidates.isEmpty()) {
-            LOGGER.info("Sablenautics: no track candidates for train {} near {}",
-                    train.id, body.logicalPose().position());
+            if (level.getGameTime() % 20 == 0) {
+                LOGGER.info("Sablenautics: no track candidates for train {} near {}",
+                        train.id, body.logicalPose().position());
+            }
             return false;
         }
 
@@ -1533,6 +1535,17 @@ public final class SableTrainController {
 
     private static void markAttached(SubLevelData data, ServerLevel level, Vector3d target,
                                      Quaterniond orientation) {
+        // Snap the body exactly onto the rail target so the bogey blocks (and the wheel
+        // models attached to them) sit on the rails instead of staying slightly offset.
+        ServerSubLevel body = data.subLevel();
+        if (body.getLevel() != null) {
+            SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(body.getLevel());
+            PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
+            if (pipeline != null) {
+                teleport(body, target, orientation, pipeline);
+            }
+        }
+
         data.attachTargetPosition = null;
         data.attachTargetOrientation = null;
         data.attachStartTick = -1L;
