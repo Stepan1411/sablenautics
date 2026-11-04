@@ -159,6 +159,11 @@ public final class SableTrainControlManager {
         session.lastInputTick = player.serverLevel().getGameTime();
     }
 
+    /** @return true while a player is sitting at this train's controls */
+    public static boolean isControlled(UUID trainId) {
+        return BY_TRAIN.containsKey(trainId);
+    }
+
     public static void stopForPlayer(ServerPlayer player, UUID trainId) {
         Session session = BY_TRAIN.get(trainId);
         if (session == null || !session.playerId.equals(player.getUUID())) return;

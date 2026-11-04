@@ -192,6 +192,24 @@ public final class SableTrainController {
     private static final double MAX_BODY_SPEED = 40.0;
     private static final double MAX_TARGET_STEP = 4.0;
 
+    /**
+     * How far a carriage may be pushed along the track before it is considered torn off.
+     * Lateral/vertical offsets still use {@link #DETACH_DISTANCE}: a train may roll along
+     * its rails, but it must not drift sideways off them.
+     */
+    private static final double MAX_LONGITUDINAL_OFFSET = 6.0;
+    /**
+     * While nobody drives, the body is only loosely coupled to the rail target along the
+     * track. The strong lateral/vertical suspension still keeps it on the rails, but any
+     * physical push can roll the train instead of being absorbed by the spring.
+     */
+    private static final double FREE_ROLL_STIFFNESS = 12.0;
+    private static final double FREE_ROLL_DAMPING = 2.0;
+    /** Constant deceleration (blocks per second squared) of an unpowered train. */
+    private static final double ROLLING_RESISTANCE = 1.0;
+    /** Body speed (blocks per second) below which a physics-driven train is considered stopped. */
+    private static final double PHYSICS_ROLL_DEADZONE = 0.1;
+
     /** Body sub-level UUID -> carriage data. */
     private static final Map<UUID, SubLevelData> SUBLEVELS = new HashMap<>();
     /** Trains whose adjacent carriage bodies already have contacts disabled. */
@@ -520,8 +538,13 @@ public final class SableTrainController {
             return;
         }
 
+        // A train nobody is driving follows actual physics: anything that pushes the carriage
+        // bodies (another contraption, a piston, an explosion, a thrown object) rolls the
+        // train along its rails instead of being absorbed by the rail spring.
+        updatePhysicsDrivenSpeed(train, data);
+
         double bodyError = pose.position().distance(targetPosition);
-        if (bodyError > DETACH_DISTANCE) {
+        if (isTornOff(train, data, pose, targetPosition, bodyError)) {
             if (targetStep > MAX_TARGET_STEP * 2.0) {
                 // The rail target jumped (relocation / newly loaded anchor). Snap to it
                 // instead of treating the jump as a derailment.
@@ -1632,10 +1655,43 @@ public final class SableTrainController {
             velocity = handle.getLinearVelocity(new Vector3d());
         }
 
-        Vector3d acceleration = new Vector3d(data.targetPosition)
-                .sub(pose.position())
-                .mul(stiffness)
-                .fma(damping, new Vector3d(data.targetVelocity).sub(velocity));
+        Vector3d acceleration;
+        Train train = Create.RAILWAYS.trains.get(data.trainId());
+        boolean freeRolling = isFreeRolling(train);
+        Vec3 forward = freeRolling ? railForward(train, data) : Vec3.ZERO;
+        boolean hasAxis = forward.lengthSqr() > 1.0e-8;
+
+        Vector3d positionError = new Vector3d(data.targetPosition).sub(pose.position());
+        Vector3d velocityError = new Vector3d(data.targetVelocity).sub(velocity);
+
+        if (hasAxis) {
+            Vector3d axis = new Vector3d(forward.x, forward.y, forward.z).normalize();
+
+            // Only the lateral/vertical offset is held by the strong rail suspension. Along
+            // the track the body keeps its momentum, so an external push can actually roll
+            // the train instead of being absorbed by the spring.
+            double alongError = positionError.dot(axis);
+            double alongVelocityError = velocityError.dot(axis);
+            Vector3d lateralError = new Vector3d(positionError).fma(-alongError, axis);
+            Vector3d lateralVelocityError = new Vector3d(velocityError).fma(-alongVelocityError, axis);
+
+            acceleration = lateralError.mul(stiffness).fma(damping, lateralVelocityError);
+
+            // A weak longitudinal coupling keeps the carriage centred under its wheel target.
+            acceleration.fma(FREE_ROLL_STIFFNESS * alongError, axis);
+            acceleration.fma(FREE_ROLL_DAMPING * alongVelocityError, axis);
+
+            // Rolling resistance makes an unpowered train come to rest on its own.
+            double alongVelocity = velocity.dot(axis);
+            if (Math.abs(alongVelocity) > 1.0e-4) {
+                double dt = Math.max(timeStep, 1.0 / 20.0 / 8.0);
+                double resistance = Math.min(ROLLING_RESISTANCE, Math.abs(alongVelocity) / dt);
+                acceleration.fma(-Math.signum(alongVelocity) * resistance, axis);
+            }
+        } else {
+            acceleration = positionError.mul(stiffness).fma(damping, velocityError);
+        }
+
         clampLength(acceleration, maxAcceleration);
 
         // Cancel gravity so the suspension only has to track the rail target.
@@ -1726,6 +1782,87 @@ public final class SableTrainController {
         data.lastTargetTick = now;
         data.targetPosition.set(targetPosition);
         data.targetOrientation.set(targetOrientation);
+    }
+
+    /**
+     * A carriage that was pushed sideways or vertically off its rail target still tears the
+     * whole train off the rails. A carriage that is only further along the track is fine:
+     * that is exactly what happens when another object pushes the train forward.
+     */
+    private static boolean isTornOff(Train train, SubLevelData data, Pose3d pose,
+                                     Vector3d targetPosition, double bodyError) {
+        if (bodyError <= DETACH_DISTANCE) return false;
+
+        Vec3 forward = railForward(train, data);
+        if (forward.lengthSqr() < 1.0e-8) {
+            return bodyError > DETACH_DISTANCE;
+        }
+
+        Vector3d offset = new Vector3d(pose.position()).sub(targetPosition);
+        Vector3d axis = new Vector3d(forward.x, forward.y, forward.z).normalize();
+        double along = offset.dot(axis);
+        double lateralSq = Math.max(0.0, offset.lengthSquared() - along * along);
+        return lateralSq > DETACH_DISTANCE * DETACH_DISTANCE
+                || Math.abs(along) > MAX_LONGITUDINAL_OFFSET;
+    }
+
+    /**
+     * The physical bodies on the rails are independent rigid bodies. Create, however, only
+     * advances the train because of its logical {@code train.speed}. While nobody drives the
+     * train, feed the actual body velocity back into Create so a push from any object rolls
+     * the train along its rails instead of being cancelled out by the rail spring.
+     * <p>
+     * Called once per train per tick (from the leading carriage).
+     */
+    private static void updatePhysicsDrivenSpeed(Train train, SubLevelData data) {
+        if (!isAutoAttachLeader(train, data)) return;
+        if (!isFreeRolling(train)) return;
+
+        double bestSpeed = 0.0;
+        boolean found = false;
+        for (SubLevelData other : SUBLEVELS.values()) {
+            if (!other.trainId().equals(train.id)) continue;
+            if (other.detached() || other.subLevel().isRemoved()) continue;
+
+            Vec3 forward = railForward(train, other);
+            if (forward.lengthSqr() < 1.0e-8) continue;
+            found = true;
+
+            Vector3dc velocity = other.subLevel().latestLinearVelocity;
+            double along = forward.x * velocity.x()
+                    + forward.y * velocity.y()
+                    + forward.z * velocity.z();
+            if (Math.abs(along) > Math.abs(bestSpeed)) {
+                bestSpeed = along;
+            }
+        }
+        if (!found) return;
+
+        double speedPerTick = Math.abs(bestSpeed) < PHYSICS_ROLL_DEADZONE
+                ? 0.0
+                : bestSpeed / 20.0;
+        double maxSpeed = Math.max(train.maxSpeed(), MAX_BODY_SPEED / 20.0);
+
+        train.speed = Mth.clamp(speedPerTick, -maxSpeed, maxSpeed);
+        train.targetSpeed = 0.0;
+        train.speedBeforeStall = null;
+        // Keep Create from applying its passive slowdown between two physics measurements.
+        train.manualTick = true;
+        if (train.speed != 0.0 && train.getCurrentStation() != null) {
+            train.leaveStation();
+        }
+    }
+
+    /**
+     * @return true when no player or schedule is currently driving the train, so physical
+     *         pushes are allowed to roll it along the rails
+     */
+    private static boolean isFreeRolling(Train train) {
+        if (train == null || train.derailed || train.graph == null) return false;
+        if (train.targetSpeed != 0.0) return false;
+        if (train.navigation.destination != null) return false;
+        if (train.speedBeforeStall != null) return false;
+        return !SableTrainControlManager.isControlled(train.id);
     }
 
     private static Quaterniond computeTargetOrientation(DimensionalCarriageEntity dce, Pose3d pose, float initialYaw) {
