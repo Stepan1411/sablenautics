@@ -241,6 +241,8 @@ public final class SableTrainController {
     private static final Map<UUID, Long> DOCKED_UNTIL = new HashMap<>();
     /** Sub-levels whose plot no longer contains any blocks, refreshed periodically. */
     private static final Set<UUID> EMPTY_BODIES = new HashSet<>();
+    /** Trains whose known carriage body was removed by Sable. */
+    private static final Set<UUID> GONE_TRAINS = new HashSet<>();
 
     /**
      * Mutable state of one carriage. Accessor method names intentionally match the old
@@ -396,6 +398,7 @@ public final class SableTrainController {
                 assemblyDirection, superglue == null ? List.of() : List.copyOf(superglue), safeBogies);
         applyConductors(data, subLevel);
         SUBLEVELS.put(subLevel.getUniqueId(), data);
+        GONE_TRAINS.remove(train.id);
         markSableTrain(train);
 
         CompoundTag bodyData = subLevel.getUserDataTag();
@@ -1423,12 +1426,33 @@ public final class SableTrainController {
             data.hasTarget = false;
             data.initialized = true;
             writeDetachedFlag(data);
+
+            // A body that came to rest is asleep in Sable's pipeline and would never run
+            // prePhysicsTick, so the approach force below would never be applied.
+            ServerSubLevel body = data.subLevel();
+            ServerLevel bodyLevel = body.getLevel();
+            SubLevelPhysicsSystem physicsSystem = bodyLevel != null ? SubLevelPhysicsSystem.get(bodyLevel) : null;
+            if (physicsSystem != null && physicsSystem.getPipeline() != null) {
+                physicsSystem.getPipeline().wakeUp(body);
+            }
         }
 
         train.speed = 0;
         train.targetSpeed = 0;
         train.derailed = true;
         LOGGER.info("Sablenautics: train {} is being smoothly pulled onto the track", train.id);
+    }
+
+    /** Abandons a smooth approach and lets the auto-attach scan try a new target. */
+    private static void cancelApproach(Train train, long nextAttemptTick) {
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id)) continue;
+            data.attachTargetPosition = null;
+            data.attachTargetOrientation = null;
+            data.attachStartTick = -1L;
+            data.hasTarget = false;
+            data.nextAttachAttemptTick = nextAttemptTick;
+        }
     }
 
     private static void markAttached(SubLevelData data, ServerLevel level, Vector3d target,
@@ -1543,6 +1567,12 @@ public final class SableTrainController {
         double mass = subLevel.getMassTracker().getMass();
         if (mass <= 0) return;
 
+        SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(subLevel.getLevel());
+        PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
+        if (pipeline != null) {
+            pipeline.wakeUp(subLevel);
+        }
+
         Pose3d pose = subLevel.logicalPose();
         Vector3d diff = new Vector3d(target).sub(pose.position());
         double distance = diff.length();
@@ -1552,9 +1582,7 @@ public final class SableTrainController {
         boolean timedOut = data.attachStartTick >= 0
                 && now - data.attachStartTick > APPROACH_TIMEOUT_TICKS;
 
-        if ((distance <= APPROACH_SNAP_DISTANCE && angle <= APPROACH_SNAP_ANGLE) || timedOut) {
-            SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(subLevel.getLevel());
-            PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
+        if (distance <= APPROACH_SNAP_DISTANCE && angle <= APPROACH_SNAP_ANGLE) {
             if (pipeline != null) {
                 ensureRailJoint(data, subLevel, pipeline, target, targetOrientation);
                 pipeline.wakeUp(subLevel);
@@ -1563,6 +1591,17 @@ public final class SableTrainController {
             Train train = Create.RAILWAYS.trains.get(data.trainId());
             if (train != null) {
                 finishTrainAttachment(train);
+            }
+            return;
+        }
+
+        if (timedOut) {
+            // Do not attach a body that is still far from the rail: the suspension would
+            // immediately tear it off again. Abandon this target and let the auto-attach
+            // scan pick a better one.
+            Train train = Create.RAILWAYS.trains.get(data.trainId());
+            if (train != null) {
+                cancelApproach(train, now + AUTO_ATTACH_RETRY_TICKS);
             }
             return;
         }
@@ -2641,6 +2680,7 @@ public final class SableTrainController {
         pose.orientation().set(orientation);
 
         pipeline.teleport(subLevel, position, orientation);
+        pipeline.wakeUp(subLevel);
         pipeline.resetVelocity(subLevel);
         subLevel.latestLinearVelocity.zero();
         subLevel.latestAngularVelocity.zero();
@@ -3015,6 +3055,7 @@ public final class SableTrainController {
      */
     public static boolean isCollisionRelevant(Train train) {
         if (train == null) return false;
+        if (GONE_TRAINS.contains(train.id)) return false;
         if (!isSableTrain(train)) return true;
 
         for (SubLevelData data : SUBLEVELS.values()) {
@@ -3188,6 +3229,10 @@ public final class SableTrainController {
             }
         }
         for (ServerSubLevel removed : removedBodies) {
+            SubLevelData removedData = SUBLEVELS.get(removed.getUniqueId());
+            if (removedData != null) {
+                GONE_TRAINS.add(removedData.trainId());
+            }
             forget(removed);
         }
 
@@ -3236,7 +3281,7 @@ public final class SableTrainController {
 
         Set<UUID> phantomSeen = new HashSet<>();
         for (Train train : new ArrayList<>(Create.RAILWAYS.trains.values())) {
-            if (!isSableTrain(train)) {
+            if (!isSableTrain(train) && !GONE_TRAINS.contains(train.id)) {
                 PHANTOM_SINCE.remove(train.id);
                 continue;
             }
@@ -3292,6 +3337,7 @@ public final class SableTrainController {
         DETACHED_TRAIN_SPEED.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         BLOCKED_TRAINS.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         DOCKED_UNTIL.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
+        GONE_TRAINS.removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
     }
 
     private static int countLiveBodies(Train train) {
@@ -3309,6 +3355,7 @@ public final class SableTrainController {
      *         opposed to a body that simply has not been restored/loaded yet
      */
     private static boolean hasGoneBody(Train train) {
+        if (GONE_TRAINS.contains(train.id)) return true;
         for (SubLevelData data : SUBLEVELS.values()) {
             if (!data.trainId().equals(train.id)) continue;
             if (data.subLevel().isRemoved()) return true;
@@ -3362,6 +3409,7 @@ public final class SableTrainController {
         LAST_TRAIN_SPEED.remove(trainId);
         DETACHED_GRAPHS.remove(trainId);
         DETACHED_TRAIN_SPEED.remove(trainId);
+        GONE_TRAINS.remove(trainId);
         CatnipServices.NETWORK.sendToAllClients(new RemoveTrainPacket(train));
     }
 
@@ -3462,6 +3510,7 @@ public final class SableTrainController {
         data.initialized = data.detached;
 
         SUBLEVELS.put(subLevel.getUniqueId(), data);
+        GONE_TRAINS.remove(trainId);
         Train train = Create.RAILWAYS.trains.get(trainId);
         if (train != null) markSableTrain(train);
         LOGGER.info("Sablenautics: Restored sublevel {} for train {} carriage {} ({} bogey entity data, detached {}, flew off {})",
@@ -3591,5 +3640,6 @@ public final class SableTrainController {
         BLOCKED_TRAINS.clear();
         DOCKED_UNTIL.clear();
         EMPTY_BODIES.clear();
+        GONE_TRAINS.clear();
     }
 }
