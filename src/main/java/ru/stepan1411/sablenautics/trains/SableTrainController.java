@@ -150,7 +150,9 @@ public final class SableTrainController {
      * snap the train onto the track anyway. This is the "crashed train lying across the
      * rails" case; without it a scattered/rotated train can never be re-railed by itself.
      */
-    private static final double AUTO_ATTACH_FORCE_DISTANCE = 2.5;
+    private static final double AUTO_ATTACH_FORCE_DISTANCE = 5.0;
+    /** ...and within this angle when a smooth physics approach is allowed. */
+    private static final double AUTO_ATTACH_FORCE_ANGLE = Math.toRadians(45.0);
     /** Bodies this close/aligned can be attached without any approach animation. */
     private static final double DIRECT_ATTACH_DISTANCE = 0.35;
     private static final double DIRECT_ATTACH_ANGLE = Math.toRadians(8.0);
@@ -1167,6 +1169,7 @@ public final class SableTrainController {
 
         Vec3 direction = trackDirection(body, data);
         List<TrackPoint> candidates = new ArrayList<>();
+        List<TrackPoint> flyOffFallbacks = new ArrayList<>();
 
         // Create's relocator starts the layout at the rear-most travelling point. If we used
         // a bogie near the front of the train as the anchor, the whole train would be laid
@@ -1188,10 +1191,13 @@ public final class SableTrainController {
                     .subtract(direction.scale(rearBogie.wheelPointSpacing() * 0.5));
             if (hasTrackNearby(level, rearPoint, TRACK_SEARCH_RADIUS)) {
                 TrackPoint rearCandidate = findNearestTrackPoint(level, rearPoint, TRACK_SEARCH_RADIUS);
-                if (rearCandidate != null
-                        && !isFlyOffAnchor(rearData, rearCandidate.worldPos())
-                        && !isOnFlyOffEdge(rearData, rearCandidate)) {
-                    candidates.add(rearCandidate);
+                if (rearCandidate != null) {
+                    if (isFlyOffAnchor(rearData, rearCandidate.worldPos())
+                            || isOnFlyOffEdge(rearData, rearCandidate)) {
+                        flyOffFallbacks.add(rearCandidate);
+                    } else {
+                        candidates.add(rearCandidate);
+                    }
                 }
             }
         }
@@ -1202,12 +1208,26 @@ public final class SableTrainController {
 
             TrackPoint candidate = findNearestTrackPoint(level, probe.point(), TRACK_SEARCH_RADIUS);
             if (candidate == null) continue;
-            if (isFlyOffAnchor(probe.data(), candidate.worldPos())) continue;
-            if (isOnFlyOffEdge(probe.data(), candidate)) continue;
+            if (isFlyOffAnchor(probe.data(), candidate.worldPos())
+                    || isOnFlyOffEdge(probe.data(), candidate)) {
+                flyOffFallbacks.add(candidate);
+                continue;
+            }
             candidates.add(candidate);
         }
 
+        // A train that left the end of its track may come to rest right next to the rails it
+        // flew off. If there is no other track within reach, allow those rails after all,
+        // otherwise the train can never re-attach.
+        if (candidates.isEmpty() && !flyOffFallbacks.isEmpty()) {
+            LOGGER.info("Sablenautics: train {} has no alternative track, retrying its fly-off rails",
+                    train.id);
+            candidates.addAll(flyOffFallbacks);
+        }
+
         if (candidates.isEmpty()) {
+            LOGGER.debug("Sablenautics: no track candidates for train {} near {}",
+                    train.id, body.logicalPose().position());
             return false;
         }
 
@@ -1227,7 +1247,13 @@ public final class SableTrainController {
         int attempts = Math.min(unique.size(), MAX_ATTACH_ATTEMPTS);
         for (int i = 0; i < attempts; i++) {
             TrackPoint chosen = unique.get(i);
-            if (!relocateToTrackPoint(train, level, chosen, direction, false)) {
+            boolean laidOut = relocateToTrackPoint(train, level, chosen, direction, false);
+            if (!laidOut) {
+                // The guessed facing may be wrong (or the train may be lying the other way
+                // around); the same spot often works when the layout is built in reverse.
+                laidOut = relocateToTrackPoint(train, level, chosen, direction.scale(-1.0), false);
+            }
+            if (!laidOut) {
                 LOGGER.debug("Sablenautics: layout rejected for train {} at {}",
                         train.id, chosen.worldPos());
                 continue;
@@ -1299,7 +1325,9 @@ public final class SableTrainController {
         }
 
         boolean closeEnough = maxError <= AUTO_ATTACH_DISTANCE && maxAngle <= AUTO_ATTACH_ANGLE;
-        if (!closeEnough && !allowApproach) {
+        boolean approachable = allowApproach
+                || (maxError <= AUTO_ATTACH_FORCE_DISTANCE && maxAngle <= AUTO_ATTACH_FORCE_ANGLE);
+        if (!closeEnough && !approachable) {
             LOGGER.debug("Sablenautics: auto-attach rejected for train {} (error {}, angle {})",
                     train.id, String.format("%.2f", maxError),
                     String.format("%.1f", Math.toDegrees(maxAngle)));
@@ -2457,6 +2485,7 @@ public final class SableTrainController {
         // the same spot, teleporting would collapse the whole train into one point.
         if (train.carriages.size() > 1) {
             Vec3 firstAnchor = null;
+            int anchorsFound = 0;
             double maxDistanceSq = 0.0;
             for (int index = 0; index < train.carriages.size(); index++) {
                 Carriage carriage = train.carriages.get(index);
@@ -2467,13 +2496,14 @@ public final class SableTrainController {
                 DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(body.getLevel().dimension());
                 if (dce == null || dce.positionAnchor == null) continue;
 
+                anchorsFound++;
                 if (firstAnchor == null) {
                     firstAnchor = dce.positionAnchor;
                 } else {
                     maxDistanceSq = Math.max(maxDistanceSq, dce.positionAnchor.distanceToSqr(firstAnchor));
                 }
             }
-            if (firstAnchor != null && maxDistanceSq < 0.25) {
+            if (anchorsFound > 1 && maxDistanceSq < 0.25) {
                 LOGGER.warn("Sablenautics: refusing to teleport collapsed train {}", train.id);
                 return 0;
             }
