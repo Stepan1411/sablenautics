@@ -201,12 +201,12 @@ public final class SableTrainController {
      */
     private static final double MAX_LONGITUDINAL_OFFSET = 6.0;
     /**
-     * While nobody drives, the body is only loosely coupled to the rail target along the
-     * track. The strong lateral/vertical suspension still keeps it on the rails, but any
-     * physical push can roll the train instead of being absorbed by the spring.
+     * While nobody drives, the body that was actually pushed is not held along the track at
+     * all; it only has rolling resistance. The remaining carriages follow it through a
+     * critically damped spring (see {@link #FREE_ROLL_DAMPING}).
      */
-    private static final double FREE_ROLL_STIFFNESS = 12.0;
-    private static final double FREE_ROLL_DAMPING = 2.0;
+    private static final double FREE_ROLL_STIFFNESS = 25.0;
+    private static final double FREE_ROLL_DAMPING = 10.0;
     /** Constant deceleration (blocks per second squared) of an unpowered train. */
     private static final double ROLLING_RESISTANCE = 1.0;
     /**
@@ -214,9 +214,9 @@ public final class SableTrainController {
      * movement each tick. The target chases the body, so this naturally reaches zero when
      * the body stops and cannot run away.
      */
-    private static final double FREE_ROLL_TARGET_GAIN = 0.5;
+    private static final double FREE_ROLL_TARGET_GAIN = 1.0;
     /** Body offset (blocks) below which a physics-driven train is considered stopped. */
-    private static final double FREE_ROLL_OFFSET_DEADZONE = 0.005;
+    private static final double FREE_ROLL_OFFSET_DEADZONE = 0.002;
 
     /** Body sub-level UUID -> carriage data. */
     private static final Map<UUID, SubLevelData> SUBLEVELS = new HashMap<>();
@@ -264,6 +264,11 @@ public final class SableTrainController {
         /** Set when the carriage left the rails because the track ended, so it never snaps back. */
         private boolean flewOff;
         private boolean initialized;
+        /**
+         * True for the carriage whose body currently drives the logical train while it is
+         * being pushed by the world. That body is not spring-loaded along the track.
+         */
+        private boolean physicsDriver;
         /** First tick at which snapping this carriage onto a nearby track may be retried. */
         private long nextAttachAttemptTick;
         /** Last on-rail travelling points, kept so we can first try the original track. */
@@ -1685,9 +1690,14 @@ public final class SableTrainController {
 
             acceleration = lateralError.mul(stiffness).fma(damping, lateralVelocityError);
 
-            // A weak longitudinal coupling keeps the carriage centred under its wheel target.
-            acceleration.fma(FREE_ROLL_STIFFNESS * alongError, axis);
-            acceleration.fma(FREE_ROLL_DAMPING * alongVelocityError, axis);
+            // The carriage that drives the logical train is not pulled along the track at
+            // all: it is the body that was actually pushed. Pulling it towards its own
+            // target would make the train swing back and forth like a pendulum. The other
+            // carriages follow it through a critically damped spring.
+            if (!data.physicsDriver) {
+                acceleration.fma(FREE_ROLL_STIFFNESS * alongError
+                        + FREE_ROLL_DAMPING * alongVelocityError, axis);
+            }
 
             // Rolling resistance makes an unpowered train come to rest on its own.
             double alongVelocity = velocity.dot(axis);
@@ -1850,6 +1860,7 @@ public final class SableTrainController {
         // Follow the carriage that leads the movement. Carriages that lag behind their own
         // targets must not slow the whole train down; their suspension pulls them along.
         double bestOffset = 0.0;
+        SubLevelData bestCarriage = null;
         boolean found = false;
         for (SubLevelData other : SUBLEVELS.values()) {
             if (!other.trainId().equals(train.id)) continue;
@@ -1858,13 +1869,21 @@ public final class SableTrainController {
             double offset = railOffsetAlong(train, other);
             if (!found) {
                 bestOffset = offset;
+                bestCarriage = other;
                 found = true;
             } else if (bestSpeed > 0.0) {
-                bestOffset = Math.max(bestOffset, offset);
+                if (offset > bestOffset) {
+                    bestOffset = offset;
+                    bestCarriage = other;
+                }
             } else if (bestSpeed < 0.0) {
-                bestOffset = Math.min(bestOffset, offset);
+                if (offset < bestOffset) {
+                    bestOffset = offset;
+                    bestCarriage = other;
+                }
             } else if (Math.abs(offset) > Math.abs(bestOffset)) {
                 bestOffset = offset;
+                bestCarriage = other;
             }
         }
         if (!found) return;
@@ -1877,6 +1896,17 @@ public final class SableTrainController {
         // moving: a lagging carriage at the back must slow the target down, not reverse it.
         if (bestSpeed > 0.05 && speedPerTick < 0.0) speedPerTick = 0.0;
         if (bestSpeed < -0.05 && speedPerTick > 0.0) speedPerTick = 0.0;
+
+        // Only the body that actually advances the train is released along the track. All
+        // other carriages stay spring-loaded so they cannot swing around their targets.
+        for (SubLevelData other : SUBLEVELS.values()) {
+            if (other.trainId().equals(train.id)) {
+                other.physicsDriver = false;
+            }
+        }
+        if (speedPerTick != 0.0 && bestCarriage != null) {
+            bestCarriage.physicsDriver = true;
+        }
 
         double maxSpeed = Math.max(train.maxSpeed(), MAX_BODY_SPEED / 20.0);
 
