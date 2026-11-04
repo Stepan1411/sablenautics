@@ -94,6 +94,11 @@ public class SableTrainTicker {
     private static void updateTrainChunkLoading(MinecraftServer server, Train train, long now) {
         UUID trainId = train.id;
         boolean moving = Math.abs(train.speed) > 0.001;
+        if (!moving && SableTrainController.isSableTrain(train)) {
+            // Detached bodies keep their physical momentum even though the logical train
+            // speed is zero; keep their chunks loaded while they are still flying.
+            moving = SableTrainController.hasMovingBody(train);
+        }
 
         if (moving) {
             LAST_MOVE_TICK.put(trainId, now);

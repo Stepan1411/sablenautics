@@ -656,8 +656,25 @@ public final class SableTrainController {
         if (!carriage.blocked) return 0;
 
         double lastSpeed = Math.abs(LAST_TRAIN_SPEED.getOrDefault(train.id, 0.0));
-        double speed = Math.max(body.latestLinearVelocity.length(),
-                Math.max(data.targetVelocity.length(), Math.max(Math.abs(train.speed), lastSpeed) * 20.0));
+        double logicalSpeed = Math.max(Math.abs(train.speed), lastSpeed) * 20.0;
+
+        // Only motion along the track counts. Using the full body speed here made a train
+        // that was merely settling on its suspension fly off at the buffer.
+        Vector3dc velocity = body.latestLinearVelocity;
+        double bodySpeed = velocity.length();
+        double targetSpeed = data.targetVelocity.length();
+
+        Vec3 forward = railForward(train, data);
+        if (forward.lengthSqr() > 1.0e-8) {
+            bodySpeed = Math.abs(forward.x * velocity.x()
+                    + forward.y * velocity.y()
+                    + forward.z * velocity.z());
+            targetSpeed = Math.abs(forward.x * data.targetVelocity.x
+                    + forward.y * data.targetVelocity.y
+                    + forward.z * data.targetVelocity.z);
+        }
+
+        double speed = Math.max(bodySpeed, Math.max(targetSpeed, logicalSpeed));
         return speed >= FLY_OFF_SPEED ? speed : 0.0;
     }
 
@@ -1059,7 +1076,6 @@ public final class SableTrainController {
      */
     private static boolean relocateToTrackPoint(Train train, ServerLevel level, TrackPoint candidate,
                                                 Vec3 direction, boolean teleportBodies) {
-        double preservedSpeed = train.speed;
         TrackGraph graph = candidate.graph();
         TrackNode node1 = graph.locateNode(candidate.edge().getFirst());
         TrackNode node2 = graph.locateNode(candidate.edge().getSecond());
@@ -1146,12 +1162,10 @@ public final class SableTrainController {
         train.navigation.waitingForSignal = null;
         train.occupiedSignalBlocks.clear();
         train.graph = graph;
-        if (teleportBodies) {
-            DETACHED_TRAIN_SPEED.putIfAbsent(train.id, preservedSpeed);
-        }
         train.speed = 0;
         train.targetSpeed = 0;
         train.speedBeforeStall = null;
+        LAST_TRAIN_SPEED.remove(train.id);
         train.cancelStall();
         if (train.navigation.destination != null) {
             train.navigation.cancelNavigation();
@@ -1569,53 +1583,14 @@ public final class SableTrainController {
         train.derailed = false;
         train.targetSpeed = 0;
         train.speedBeforeStall = null;
+        // A train that was re-railed after coming to rest must stay at rest. Restoring the
+        // speed it had when it left the rails launched it off the end again after fly-offs.
+        train.speed = 0;
 
-        Double storedSpeed = DETACHED_TRAIN_SPEED.get(train.id);
-        double preservedSpeed = storedSpeed != null ? storedSpeed : preservedBodySpeed(train);
-        double maxSpeed = train.maxSpeed();
-        train.speed = Mth.clamp(preservedSpeed, -maxSpeed, maxSpeed);
-
-        // Keep the forward part of the physical velocity consistent with the logical train
-        // speed, so attachment neither stops the train nor launches it sideways.
-        applyPreservedVelocity(train);
-
+        LAST_TRAIN_SPEED.remove(train.id);
         DETACHED_GRAPHS.remove(train.id);
         DETACHED_TRAIN_SPEED.remove(train.id);
         linkNeighbours(train);
-    }
-
-    private static void applyPreservedVelocity(Train train) {
-        for (SubLevelData data : SUBLEVELS.values()) {
-            if (!data.trainId().equals(train.id) || data.detached) continue;
-            ServerSubLevel body = data.subLevel();
-            ServerLevel level = body.getLevel();
-            if (level == null) continue;
-
-            SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(level);
-            PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
-            RigidBodyHandle handle = physicsSystem != null ? physicsSystem.getPhysicsHandle(body) : null;
-            if (pipeline == null || handle == null) continue;
-
-            Vec3 forward = railForward(train, data);
-            if (forward.lengthSqr() < 1.0e-8) continue;
-
-            Vector3d axis = new Vector3d(forward.x, forward.y, forward.z);
-            double desiredForward = train.speed * 20.0;
-            double currentForward = handle.getLinearVelocity(new Vector3d()).dot(axis);
-            handle.addLinearAndAngularVelocity(
-                    new Vector3d(axis).mul(desiredForward - currentForward),
-                    new Vector3d());
-            pipeline.wakeUp(body);
-        }
-    }
-
-    private static double preservedBodySpeed(Train train) {
-        SubLevelData data = dataFor(train, 0);
-        if (data == null) return 0.0;
-        Vec3 forward = railForward(train, data);
-        if (forward.lengthSqr() < 1.0e-8) return 0.0;
-        Vector3dc velocity = data.subLevel().latestLinearVelocity;
-        return new Vector3d(forward.x, forward.y, forward.z).dot(velocity) / 20.0;
     }
 
     private static Vec3 railForward(Train train, SubLevelData data) {
@@ -2730,8 +2705,10 @@ public final class SableTrainController {
 
         if (moved > 0) {
             train.derailed = false;
-            double preservedSpeed = DETACHED_TRAIN_SPEED.getOrDefault(train.id, train.speed);
-            train.speed = Mth.clamp(preservedSpeed, -train.maxSpeed(), train.maxSpeed());
+            train.speed = 0;
+            train.targetSpeed = 0;
+            train.speedBeforeStall = null;
+            LAST_TRAIN_SPEED.remove(train.id);
             DETACHED_GRAPHS.remove(train.id);
             DETACHED_TRAIN_SPEED.remove(train.id);
             // All carriages are attached again, so they must not collide with each other.
@@ -3099,6 +3076,21 @@ public final class SableTrainController {
 
         ensureMappings(train);
         return subLevelFor(train, index) != null || isSableTrain(train);
+    }
+
+    /**
+     * @return true when any physical carriage body of the train is still moving
+     */
+    public static boolean hasMovingBody(Train train) {
+        if (train == null) return false;
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id)) continue;
+            if (data.subLevel().isRemoved()) continue;
+            if (data.subLevel().latestLinearVelocity.lengthSquared() > 0.01) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** @return true if this train was assembled with a physics sticker (persisted in its NBT) */
