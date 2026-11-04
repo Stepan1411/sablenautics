@@ -151,8 +151,6 @@ public final class SableTrainController {
      * rails" case; without it a scattered/rotated train can never be re-railed by itself.
      */
     private static final double AUTO_ATTACH_FORCE_DISTANCE = 5.0;
-    /** ...and within this angle when a smooth physics approach is allowed. */
-    private static final double AUTO_ATTACH_FORCE_ANGLE = Math.toRadians(45.0);
     /** Bodies this close/aligned can be attached without any approach animation. */
     private static final double DIRECT_ATTACH_DISTANCE = 0.35;
     private static final double DIRECT_ATTACH_ANGLE = Math.toRadians(8.0);
@@ -836,7 +834,8 @@ public final class SableTrainController {
         if (train == null || level == null || point == null) return false;
         TrackPoint nearest = findNearestTrackPoint(level, point, searchRadius);
         if (nearest == null) return false;
-        return relocateToTrackPoint(train, level, nearest, direction, true);
+
+        return tryLayoutAround(train, level, nearest, direction, true);
     }
 
     /**
@@ -851,7 +850,7 @@ public final class SableTrainController {
         Vec3 direction = lookDirection == null ? Vec3.ZERO : lookDirection;
         TrackPoint exact = trackPointAtBlock(level, pos, direction);
         if (exact != null) {
-            if (relocateToTrackPoint(train, level, exact, direction, true)) {
+            if (tryLayoutAround(train, level, exact, direction, true)) {
                 return true;
             }
 
@@ -898,6 +897,44 @@ public final class SableTrainController {
 
     /** A point on a track graph edge, used for attaching a train to any rail segment. */
     private record TrackPoint(TrackGraph graph, Couple<TrackNodeLocation> edge, double position, Vec3 worldPos) {
+    }
+
+    /**
+     * Tries a track point and a few positions around it on the same edge, in both directions.
+     * A long train often does not fit when its layout starts exactly at the clicked rail;
+     * shifting the start a few blocks along the same track lets it fit without the player
+     * having to click a different block.
+     */
+    private static boolean tryLayoutAround(Train train, ServerLevel level, TrackPoint point,
+                                           Vec3 direction, boolean teleportBodies) {
+        for (double offset : new double[]{0.0, 2.0, -2.0, 4.0, -4.0, 6.0, -6.0}) {
+            TrackPoint candidate = offset == 0.0 ? point : offsetTrackPoint(point, offset);
+            if (candidate == null) continue;
+            if (relocateToTrackPoint(train, level, candidate, direction, teleportBodies)) {
+                return true;
+            }
+            if (relocateToTrackPoint(train, level, candidate,
+                    direction == null ? null : direction.scale(-1.0), teleportBodies)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static @Nullable TrackPoint offsetTrackPoint(TrackPoint point, double offset) {
+        TrackGraph graph = point.graph();
+        TrackNode node1 = graph.locateNode(point.edge().getFirst());
+        TrackNode node2 = graph.locateNode(point.edge().getSecond());
+        if (node1 == null || node2 == null) return null;
+
+        TrackEdge edge = graph.getConnectionsFrom(node1).get(node2);
+        if (edge == null || edge.getLength() <= 1.0e-4) return null;
+
+        double position = point.position() + offset;
+        if (position < 0.0 || position > edge.getLength()) return null;
+
+        double t = position / edge.getLength();
+        return new TrackPoint(graph, point.edge(), position, edge.getPosition(graph, t));
     }
 
     /**
@@ -1247,13 +1284,7 @@ public final class SableTrainController {
         int attempts = Math.min(unique.size(), MAX_ATTACH_ATTEMPTS);
         for (int i = 0; i < attempts; i++) {
             TrackPoint chosen = unique.get(i);
-            boolean laidOut = relocateToTrackPoint(train, level, chosen, direction, false);
-            if (!laidOut) {
-                // The guessed facing may be wrong (or the train may be lying the other way
-                // around); the same spot often works when the layout is built in reverse.
-                laidOut = relocateToTrackPoint(train, level, chosen, direction.scale(-1.0), false);
-            }
-            if (!laidOut) {
+            if (!tryLayoutAround(train, level, chosen, direction, false)) {
                 LOGGER.debug("Sablenautics: layout rejected for train {} at {}",
                         train.id, chosen.worldPos());
                 continue;
@@ -1325,9 +1356,7 @@ public final class SableTrainController {
         }
 
         boolean closeEnough = maxError <= AUTO_ATTACH_DISTANCE && maxAngle <= AUTO_ATTACH_ANGLE;
-        boolean approachable = allowApproach
-                || (maxError <= AUTO_ATTACH_FORCE_DISTANCE && maxAngle <= AUTO_ATTACH_FORCE_ANGLE);
-        if (!closeEnough && !approachable) {
+        if (!closeEnough && !allowApproach) {
             LOGGER.debug("Sablenautics: auto-attach rejected for train {} (error {}, angle {})",
                     train.id, String.format("%.2f", maxError),
                     String.format("%.1f", Math.toDegrees(maxAngle)));
