@@ -150,7 +150,7 @@ public final class SableTrainController {
      * snap the train onto the track anyway. This is the "crashed train lying across the
      * rails" case; without it a scattered/rotated train can never be re-railed by itself.
      */
-    private static final double AUTO_ATTACH_FORCE_DISTANCE = 5.0;
+    private static final double AUTO_ATTACH_FORCE_DISTANCE = 8.0;
     /** Bodies this close/aligned can be attached without any approach animation. */
     private static final double DIRECT_ATTACH_DISTANCE = 0.35;
     private static final double DIRECT_ATTACH_ANGLE = Math.toRadians(8.0);
@@ -173,7 +173,7 @@ public final class SableTrainController {
     /** Cheap re-probe interval while the train has not found any nearby track yet. */
     private static final int AUTO_ATTACH_SCAN_INTERVAL = 2;
     /** How far from a bogey the nearest track edge is looked up. */
-    private static final double TRACK_SEARCH_RADIUS = 5.0;
+    private static final double TRACK_SEARCH_RADIUS = 8.0;
 
     /** How many bogies are checked against the graph per attempt. */
     private static final int MAX_ATTACH_PROBES = 6;
@@ -239,6 +239,8 @@ public final class SableTrainController {
     private static final Map<UUID, Long> BLOCKED_TRAINS = new HashMap<>();
     /** Game tick until which a freshly docked train is held still. */
     private static final Map<UUID, Long> DOCKED_UNTIL = new HashMap<>();
+    /** Sub-levels whose plot no longer contains any blocks, refreshed periodically. */
+    private static final Set<UUID> EMPTY_BODIES = new HashSet<>();
 
     /**
      * Mutable state of one carriage. Accessor method names intentionally match the old
@@ -907,15 +909,27 @@ public final class SableTrainController {
      */
     private static boolean tryLayoutAround(Train train, ServerLevel level, TrackPoint point,
                                            Vec3 direction, boolean teleportBodies) {
-        for (double offset : new double[]{0.0, 2.0, -2.0, 4.0, -4.0, 6.0, -6.0}) {
-            TrackPoint candidate = offset == 0.0 ? point : offsetTrackPoint(point, offset);
-            if (candidate == null) continue;
-            if (relocateToTrackPoint(train, level, candidate, direction, teleportBodies)) {
-                return true;
-            }
-            if (relocateToTrackPoint(train, level, candidate,
-                    direction == null ? null : direction.scale(-1.0), teleportBodies)) {
-                return true;
+        // A manual relocation can try a whole train length of positions around the clicked
+        // block; auto-attachment stays cheap and only probes a few blocks.
+        double maxOffset = teleportBodies
+                ? Math.max(8.0, train.getTotalLength())
+                : 6.0;
+        double step = teleportBodies ? 4.0 : 2.0;
+        int steps = Math.max(1, (int) Math.ceil(maxOffset / step));
+
+        for (int i = 0; i <= steps; i++) {
+            double offset = i * step;
+            for (int sign = i == 0 ? 1 : -1; sign <= 1; sign += 2) {
+                double shifted = offset * sign;
+                TrackPoint candidate = shifted == 0.0 ? point : offsetTrackPoint(point, shifted);
+                if (candidate == null) continue;
+                if (relocateToTrackPoint(train, level, candidate, direction, teleportBodies)) {
+                    return true;
+                }
+                if (relocateToTrackPoint(train, level, candidate,
+                        direction == null ? null : direction.scale(-1.0), teleportBodies)) {
+                    return true;
+                }
             }
         }
         return false;
@@ -2682,6 +2696,33 @@ public final class SableTrainController {
         return data != null && data.subLevel() == serverSubLevel ? data : null;
     }
 
+    /**
+     * @return the closest Sable carriage body to {@code point}, used when a block click does
+     *         not map back to its sub-level
+     */
+    public static @Nullable SubLevelData dataNear(ServerLevel level, Vec3 point, double radius) {
+        SubLevelData best = null;
+        double bestDistanceSq = radius * radius;
+
+        for (SubLevelData data : SUBLEVELS.values()) {
+            ServerSubLevel body = data.subLevel();
+            if (body.isRemoved() || body.getLevel() != level) continue;
+
+            BoundingBox3ic bounds = body.getPlot().getBoundingBox();
+            if (bounds == null) continue;
+
+            AABB box = worldBounds(bounds, body.logicalPose());
+            if (box == null) continue;
+
+            double distanceSq = box.distanceToSqr(point);
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                best = data;
+            }
+        }
+        return best;
+    }
+
     public static @Nullable ServerSubLevel subLevelFor(Train train, int carriageIndex) {
         for (SubLevelData data : SUBLEVELS.values()) {
             if (data.trainId().equals(train.id)
@@ -2978,7 +3019,7 @@ public final class SableTrainController {
 
         for (SubLevelData data : SUBLEVELS.values()) {
             if (!data.trainId().equals(train.id)) continue;
-            if (!data.subLevel().isRemoved() && !data.detached) return true;
+            if (bodyHasBlocks(data) && !data.detached) return true;
         }
         return false;
     }
@@ -3097,6 +3138,7 @@ public final class SableTrainController {
 
     public static void forget(ServerSubLevel subLevel) {
         ORPHAN_SINCE.remove(subLevel.getUniqueId());
+        EMPTY_BODIES.remove(subLevel.getUniqueId());
         SubLevelData data = SUBLEVELS.remove(subLevel.getUniqueId());
         if (data != null) {
             removeRailJoint(data);
@@ -3149,6 +3191,20 @@ public final class SableTrainController {
             forget(removed);
         }
 
+        // Sable can leave an empty sub-level behind after every block of a carriage is
+        // broken. Such a body must no longer take part in collisions, and after the normal
+        // phantom timeout the whole train is removed.
+        for (SubLevelData data : SUBLEVELS.values()) {
+            UUID bodyId = data.subLevel().getUniqueId();
+            if (data.subLevel().isRemoved()) {
+                EMPTY_BODIES.remove(bodyId);
+            } else if (isPlotEmpty(data.subLevel())) {
+                EMPTY_BODIES.add(bodyId);
+            } else {
+                EMPTY_BODIES.remove(bodyId);
+            }
+        }
+
         Set<UUID> orphanSeen = new HashSet<>();
         for (ServerLevel level : server.getAllLevels()) {
             SubLevelContainer container = SubLevelContainer.getContainer(level);
@@ -3188,12 +3244,13 @@ public final class SableTrainController {
             ensureMappings(train);
             int expected = train.carriages.size();
             int live = countLiveBodies(train);
+            boolean bodyGone = hasGoneBody(train);
 
             // Invisible carriages are removed from the collision graph right away; this alone
             // already prevents other trains from crashing into something that is not there.
             // A fully body-less train that is not known to be derailed may simply still be
             // loading, so leave its data untouched in that case.
-            if (live > 0 || train.derailed || train.graph == null) {
+            if (live > 0 || train.derailed || train.graph == null || bodyGone) {
                 if (live < expected) {
                     suspendMissingCarriages(train);
                 }
@@ -3213,7 +3270,7 @@ public final class SableTrainController {
             // Only fully derailed/off-rails trains are removed. An attached train whose
             // sub-levels have not been restored yet (slow load, far-away chunks) keeps its
             // graph and must not be deleted; it is still hidden from collisions above.
-            if (!train.derailed && train.graph != null) {
+            if (!train.derailed && train.graph != null && !bodyGone) {
                 PHANTOM_SINCE.remove(train.id);
                 continue;
             }
@@ -3240,20 +3297,59 @@ public final class SableTrainController {
     private static int countLiveBodies(Train train) {
         int count = 0;
         for (SubLevelData data : SUBLEVELS.values()) {
-            if (data.trainId().equals(train.id) && !data.subLevel().isRemoved()) {
+            if (data.trainId().equals(train.id) && bodyHasBlocks(data)) {
                 count++;
             }
         }
         return count;
     }
 
+    /**
+     * @return true when a known carriage body was removed or has lost every block, as
+     *         opposed to a body that simply has not been restored/loaded yet
+     */
+    private static boolean hasGoneBody(Train train) {
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id)) continue;
+            if (data.subLevel().isRemoved()) return true;
+            if (EMPTY_BODIES.contains(data.subLevel().getUniqueId())) return true;
+        }
+        return false;
+    }
+
     private static void suspendMissingCarriages(Train train) {
         for (int i = 0; i < train.carriages.size(); i++) {
             SubLevelData data = dataFor(train, i);
-            if (data == null || data.subLevel().isRemoved()) {
+            if (data == null || !bodyHasBlocks(data)) {
                 suspendCarriagePoints(train, i);
             }
         }
+    }
+
+    private static boolean bodyHasBlocks(SubLevelData data) {
+        if (data == null || data.subLevel().isRemoved()) return false;
+        if (EMPTY_BODIES.contains(data.subLevel().getUniqueId())) return false;
+        BoundingBox3ic bounds = data.subLevel().getPlot().getBoundingBox();
+        return bounds != null && bounds.volume() > 0;
+    }
+
+    private static boolean isPlotEmpty(ServerSubLevel body) {
+        BoundingBox3ic bounds = body.getPlot().getBoundingBox();
+        if (bounds == null || bounds.volume() <= 0) return true;
+
+        ServerLevel level = body.getLevel();
+        if (level == null) return false;
+
+        for (int x = bounds.minX(); x <= bounds.maxX(); x++) {
+            for (int y = bounds.minY(); y <= bounds.maxY(); y++) {
+                for (int z = bounds.minZ(); z <= bounds.maxZ(); z++) {
+                    if (!level.getBlockState(new BlockPos(x, y, z)).isAir()) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
     }
 
     private static void removePhantomTrain(MinecraftServer server, Train train) {
@@ -3494,5 +3590,6 @@ public final class SableTrainController {
         DETACHED_TRAIN_SPEED.clear();
         BLOCKED_TRAINS.clear();
         DOCKED_UNTIL.clear();
+        EMPTY_BODIES.clear();
     }
 }

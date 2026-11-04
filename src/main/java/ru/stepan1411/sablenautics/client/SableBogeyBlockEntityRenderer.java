@@ -206,8 +206,8 @@ public class SableBogeyBlockEntityRenderer implements BlockEntityRenderer<SableB
             return;
         }
 
-        // The model's rolling direction is opposite to Create's stored bogey angle sign.
-        float targetRate = -blockEntity.getWheelAngleDelta();
+        // Match the wheel model's rolling direction to the train's direction of travel.
+        float targetRate = blockEntity.getWheelAngleDelta();
         if (!spin.initialized) {
             spin.rate = targetRate;
             spin.initialized = true;

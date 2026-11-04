@@ -97,6 +97,11 @@ public final class SableTrainRelocation {
         if (player.isShiftKeyDown()) return false;
 
         SableTrainController.SubLevelData data = SableTrainController.dataAt(level, pos);
+        if (data == null) {
+            // Clicking a small or non-collidable block can miss the sub-level lookup;
+            // fall back to the closest Sable carriage body.
+            data = SableTrainController.dataNear(level, net.minecraft.world.phys.Vec3.atCenterOf(pos), 6.0);
+        }
         if (data == null) return false;
 
         Train train = Create.RAILWAYS.trains.get(data.trainId());
