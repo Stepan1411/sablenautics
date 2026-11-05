@@ -9,13 +9,13 @@ import ru.stepan1411.sablenautics.client.ClientSableTrainControls;
 import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
 import ru.stepan1411.sablenautics.index.SablenauticsBlockEntityTypes;
 import ru.stepan1411.sablenautics.index.SablenauticsBogeyStyles;
-import ru.stepan1411.sablenautics.index.SablenauticsItems;
 import ru.stepan1411.sablenautics.network.SablenauticsNetwork;
 import ru.stepan1411.sablenautics.trains.SableTrainCommands;
 import ru.stepan1411.sablenautics.trains.SableTrainControlManager;
 import ru.stepan1411.sablenautics.trains.SableTrainControlsEvents;
 import ru.stepan1411.sablenautics.trains.SableTrainRelocation;
 import ru.stepan1411.sablenautics.trains.SableTrainScheduleEvents;
+import ru.stepan1411.sablenautics.trains.SuspensionHeightEvents;
 
 @Mod(Sablenautics.MOD_ID)
 public class Sablenautics {
@@ -32,11 +32,11 @@ public class Sablenautics {
         SablenauticsBogeyStyles.init();
         SablenauticsBlocks.init();
         SablenauticsBlockEntityTypes.init();
-        SablenauticsItems.init();
 
         modEventBus.addListener(SablenauticsNetwork::register);
 
         NeoForge.EVENT_BUS.addListener(SableTrainControlsEvents::onRightClickBlock);
+        NeoForge.EVENT_BUS.addListener(SuspensionHeightEvents::onRightClickBlock);
         NeoForge.EVENT_BUS.addListener(SableTrainRelocation::onRightClickBlock);
         NeoForge.EVENT_BUS.addListener(SableTrainControlsEvents::onServerStopped);
         NeoForge.EVENT_BUS.addListener(SableTrainControlsEvents::onEntityJoinLevel);

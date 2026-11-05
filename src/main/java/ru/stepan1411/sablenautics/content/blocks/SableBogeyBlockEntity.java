@@ -55,6 +55,11 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
 
     private static final int MAX_TARGET_HISTORY = 20;
 
+    /** Suspension height range and adjustment step, in blocks. */
+    public static final float MIN_SUSPENSION_OFFSET = -3.0f;
+    public static final float MAX_SUSPENSION_OFFSET = 3.0f;
+    public static final float SUSPENSION_STEP = 0.25f;
+
     private @Nullable ResourceLocation renderSizeId;
 
     /** Last rail target received from the server, in world coordinates. */
@@ -165,7 +170,7 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
     }
 
     public void setSuspensionOffset(float offset) {
-        this.suspensionOffset = offset;
+        this.suspensionOffset = Math.max(MIN_SUSPENSION_OFFSET, Math.min(MAX_SUSPENSION_OFFSET, offset));
         setChanged();
         if (getLevel() instanceof ServerLevel serverLevel) {
             serverLevel.sendBlockUpdated(getBlockPos(), getBlockState(), getBlockState(), Block.UPDATE_CLIENTS);

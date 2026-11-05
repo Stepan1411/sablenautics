@@ -1,11 +1,14 @@
 package ru.stepan1411.sablenautics.network;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import ru.stepan1411.sablenautics.client.ClientSableTrainControls;
+import ru.stepan1411.sablenautics.client.ClientSuspensionHeightScreen;
+import ru.stepan1411.sablenautics.content.blocks.SableBogeyBlockEntity;
 import ru.stepan1411.sablenautics.trains.SableTrainControlManager;
 
 import java.util.UUID;
@@ -33,6 +36,20 @@ public final class SablenauticsNetwork {
                         (payload, context) -> context.enqueueWork(() -> {
                             if (context.player() instanceof ServerPlayer player) {
                                 SableTrainControlManager.handleInput(player, payload.trainId(), payload.mask());
+                            }
+                        }))
+                .playToClient(SuspensionHeightOpenPayload.TYPE, SuspensionHeightOpenPayload.STREAM_CODEC,
+                        (payload, context) -> context.enqueueWork(() -> {
+                            if (FMLEnvironment.dist == Dist.CLIENT) {
+                                ClientSuspensionHeightScreen.open(payload.pos(), payload.height());
+                            }
+                        }))
+                .playToServer(SuspensionHeightUpdatePayload.TYPE, SuspensionHeightUpdatePayload.STREAM_CODEC,
+                        (payload, context) -> context.enqueueWork(() -> {
+                            if (context.player() instanceof ServerPlayer player
+                                    && player.serverLevel().getBlockEntity(payload.pos())
+                                    instanceof SableBogeyBlockEntity bogey) {
+                                bogey.setSuspensionOffset(payload.height());
                             }
                         }))
                 .playBidirectional(TrainControlStopPayload.TYPE, TrainControlStopPayload.STREAM_CODEC,
@@ -65,5 +82,13 @@ public final class SablenauticsNetwork {
 
     public static void requestStop(UUID trainId) {
         PacketDistributor.sendToServer(new TrainControlStopPayload(trainId));
+    }
+
+    public static void sendOpenSuspensionHeight(ServerPlayer player, BlockPos pos, float height) {
+        PacketDistributor.sendToPlayer(player, new SuspensionHeightOpenPayload(pos, height));
+    }
+
+    public static void sendSuspensionHeightUpdate(BlockPos pos, float height) {
+        PacketDistributor.sendToServer(new SuspensionHeightUpdatePayload(pos, height));
     }
 }

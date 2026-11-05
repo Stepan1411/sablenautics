@@ -40,6 +40,7 @@ public final class SableTrainRelocation {
     }
 
     public static boolean onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+        if (event.isCanceled()) return false;
         if (event.getHand() != InteractionHand.MAIN_HAND) return false;
         if (!(event.getLevel() instanceof ServerLevel level)) return false;
         if (!(event.getEntity() instanceof ServerPlayer player)) return false;
