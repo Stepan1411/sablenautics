@@ -35,7 +35,6 @@ public class Sablenautics {
         SablenauticsItems.init();
 
         modEventBus.addListener(SablenauticsNetwork::register);
-        modEventBus.addListener(SablenauticsItems::onBuildCreativeModeTabContents);
 
         NeoForge.EVENT_BUS.addListener(SableTrainControlsEvents::onRightClickBlock);
         NeoForge.EVENT_BUS.addListener(SableTrainRelocation::onRightClickBlock);
