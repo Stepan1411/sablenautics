@@ -15,16 +15,15 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Uses Create's own value-selection screen (the one from the creative motor) for the
- * suspension height of a single Sable bogey.
+ * Create's value-selection screen (the one from the creative motor), configured with two
+ * rows for positive and negative suspension heights.
  */
 public class ClientSuspensionHeightScreen extends ValueSettingsScreen {
 
     private static final int STEPS_PER_BLOCK = 4;
     private static final float STEP = 1.0f / STEPS_PER_BLOCK;
     private static final int MAX_INDEX = Math.round(
-            (SableBogeyBlockEntity.MAX_SUSPENSION_OFFSET - SableBogeyBlockEntity.MIN_SUSPENSION_OFFSET)
-                    / STEP);
+            SableBogeyBlockEntity.MAX_SUSPENSION_OFFSET / STEP);
 
     private final BlockPos bogeyPos;
 
@@ -35,27 +34,31 @@ public class ClientSuspensionHeightScreen extends ValueSettingsScreen {
     }
 
     public static void open(BlockPos pos, float height) {
-        int index = Mth.clamp(Math.round(
-                        (height - SableBogeyBlockEntity.MIN_SUSPENSION_OFFSET) / STEP),
-                0, MAX_INDEX);
+        int row = height < 0.0f ? 1 : 0;
+        int index = Mth.clamp(Math.round(Math.abs(height) / STEP), 0, MAX_INDEX);
 
         ValueSettingsBoard board = new ValueSettingsBoard(
                 Component.translatable("sablenautics.suspension_height.gui"),
                 MAX_INDEX,
                 STEPS_PER_BLOCK,
-                List.of(Component.translatable("sablenautics.suspension_height.row")),
-                new ValueSettingsFormatter(settings -> Component.literal(String.format(Locale.ROOT,
-                        "%+.2f", SableBogeyBlockEntity.MIN_SUSPENSION_OFFSET
-                                + settings.value() * STEP))));
+                List.of(
+                        Component.translatable("sablenautics.suspension_height.positive"),
+                        Component.translatable("sablenautics.suspension_height.negative")),
+                new ValueSettingsFormatter(settings -> {
+                    float value = settings.value() * STEP;
+                    if (settings.row() == 1) value = -value;
+                    return Component.literal(String.format(Locale.ROOT, "%+.2f", value));
+                }));
 
         Minecraft.getInstance().setScreen(new ClientSuspensionHeightScreen(
-                pos, board, new ValueSettings(0, index)));
+                pos, board, new ValueSettings(row, index)));
     }
 
     @Override
     protected void saveAndClose(double mouseX, double mouseY) {
         ValueSettings closest = getClosestCoordinate((int) mouseX, (int) mouseY);
-        float height = SableBogeyBlockEntity.MIN_SUSPENSION_OFFSET + closest.value() * STEP;
+        float height = closest.value() * STEP;
+        if (closest.row() == 1) height = -height;
         SablenauticsNetwork.sendSuspensionHeightUpdate(bogeyPos, height);
         onClose();
     }
