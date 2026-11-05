@@ -26,10 +26,10 @@ import java.util.Locale;
  */
 public class SuspensionHeightToolItem extends Item {
 
-    /** One click moves the wheels by one sixteenth of a block. */
-    public static final float STEP = 1.0f / 16.0f;
-    public static final float MIN_OFFSET = -8.0f / 16.0f;
-    public static final float MAX_OFFSET = 8.0f / 16.0f;
+    /** One click moves the carriage body by a quarter of a block. */
+    public static final float STEP = 0.25f;
+    public static final float MIN_OFFSET = -3.0f;
+    public static final float MAX_OFFSET = 3.0f;
 
     public SuspensionHeightToolItem(Properties properties) {
         super(properties);
@@ -64,7 +64,7 @@ public class SuspensionHeightToolItem extends Item {
         bogey.setSuspensionOffset(next);
         if (player != null) {
             player.displayClientMessage(Component.translatable("sablenautics.suspension_height.value",
-                    String.format(Locale.ROOT, "%+.0f", next * 16.0f)), true);
+                    String.format(Locale.ROOT, "%+.2f", next)), true);
         }
         level.playSound(null, pos, SoundEvents.LEVER_CLICK, SoundSource.BLOCKS,
                 0.6f, lowering ? 0.8f : 1.2f);
@@ -78,5 +78,7 @@ public class SuspensionHeightToolItem extends Item {
                 .withStyle(ChatFormatting.GRAY));
         tooltip.add(Component.translatable("sablenautics.suspension_height.lower")
                 .withStyle(ChatFormatting.GRAY));
+        tooltip.add(Component.translatable("sablenautics.suspension_height.range")
+                .withStyle(ChatFormatting.DARK_GRAY));
     }
 }
