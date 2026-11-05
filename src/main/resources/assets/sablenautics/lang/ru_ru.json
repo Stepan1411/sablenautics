@@ -5,7 +5,6 @@
   "sablenautics.suspension_height.gui": "Высота подвески",
   "sablenautics.suspension_height.positive": "Блоки +",
   "sablenautics.suspension_height.negative": "Блоки -",
-  "sablenautics.suspension_height.hud": "Подвеска: %s блоков",
   "sablenautics.relocate.selected": "Выбран поезд %s. Нажмите галочкой на рельсы, чтобы переместить его туда.",
   "sablenautics.relocate.success": "Поезд %s перемещён на рельсы.",
   "sablenautics.relocate.invalid": "Сюда поезд поставить нельзя: путь заблокирован или не хватает места.",
