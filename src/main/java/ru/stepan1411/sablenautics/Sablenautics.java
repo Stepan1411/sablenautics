@@ -9,6 +9,7 @@ import ru.stepan1411.sablenautics.client.ClientSableTrainControls;
 import ru.stepan1411.sablenautics.index.SablenauticsBlocks;
 import ru.stepan1411.sablenautics.index.SablenauticsBlockEntityTypes;
 import ru.stepan1411.sablenautics.index.SablenauticsBogeyStyles;
+import ru.stepan1411.sablenautics.index.SablenauticsItems;
 import ru.stepan1411.sablenautics.network.SablenauticsNetwork;
 import ru.stepan1411.sablenautics.trains.SableTrainCommands;
 import ru.stepan1411.sablenautics.trains.SableTrainControlManager;
@@ -31,6 +32,7 @@ public class Sablenautics {
         SablenauticsBogeyStyles.init();
         SablenauticsBlocks.init();
         SablenauticsBlockEntityTypes.init();
+        SablenauticsItems.init();
 
         modEventBus.addListener(SablenauticsNetwork::register);
 

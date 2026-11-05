@@ -51,6 +51,7 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
     private static final String TARGET_QW_KEY = "BogeyTargetQW";
     private static final String TARGET_TICK_KEY = "BogeyTargetTick";
     private static final String WHEEL_ANGLE_DELTA_KEY = "WheelAngleDelta";
+    private static final String SUSPENSION_OFFSET_KEY = "SuspensionOffset";
 
     private static final int MAX_TARGET_HISTORY = 20;
 
@@ -62,6 +63,11 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
     private final Quaternionf targetOrientation = new Quaternionf();
     private float wheelAngleDelta;
     private int targetTick;
+    /**
+     * Visual height of this bogey's wheel model relative to the rail target, in blocks.
+     * Negative values lower the wheels, positive values raise them.
+     */
+    private float suspensionOffset;
 
     /** Client-only history of rail targets, tagged with Sable's interpolation tick. */
     private final List<TargetSample> targetHistory = new ArrayList<>();
@@ -154,6 +160,18 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
         return wheelAngleDelta;
     }
 
+    public float getSuspensionOffset() {
+        return suspensionOffset;
+    }
+
+    public void setSuspensionOffset(float offset) {
+        this.suspensionOffset = offset;
+        setChanged();
+        if (getLevel() instanceof ServerLevel serverLevel) {
+            serverLevel.sendBlockUpdated(getBlockPos(), getBlockState(), getBlockState(), Block.UPDATE_CLIENTS);
+        }
+    }
+
     /**
      * Samples the synced rail target at the given Sable interpolation tick.
      *
@@ -216,6 +234,7 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
         tag.putFloat(TARGET_QW_KEY, targetOrientation.w);
         tag.putInt(TARGET_TICK_KEY, targetTick);
         tag.putFloat(WHEEL_ANGLE_DELTA_KEY, wheelAngleDelta);
+        tag.putFloat(SUSPENSION_OFFSET_KEY, suspensionOffset);
         return tag;
     }
 
@@ -225,6 +244,7 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
         if (renderSizeId != null) {
             tag.putString(RENDER_SIZE_KEY, renderSizeId.toString());
         }
+        tag.putFloat(SUSPENSION_OFFSET_KEY, suspensionOffset);
     }
 
     @Override
@@ -248,6 +268,7 @@ public class SableBogeyBlockEntity extends AbstractBogeyBlockEntity {
                 tag.getFloat(TARGET_QW_KEY));
         targetTick = tag.getInt(TARGET_TICK_KEY);
         wheelAngleDelta = tag.getFloat(WHEEL_ANGLE_DELTA_KEY);
+        suspensionOffset = tag.getFloat(SUSPENSION_OFFSET_KEY);
 
         if (client) {
             if (hasTarget) {
