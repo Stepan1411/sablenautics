@@ -574,7 +574,7 @@ public final class SableTrainController {
         Pose3d pose = serverSubLevel.logicalPose();
         Vec3 anchor = dce.positionAnchor;
         Quaterniond targetOrientation = computeTargetOrientation(dce, pose, data.initialYaw());
-        Vector3d targetPosition = computeTargetPosition(serverSubLevel, anchor, targetOrientation);
+        Vector3d targetPosition = computeBodyTargetPosition(serverSubLevel, data, anchor, targetOrientation);
         if (!isFinite(targetPosition) || !isFinite(targetOrientation)) {
             LOGGER.warn("Sablenautics: carriage {} of train {} has an invalid rail target ({} / {})",
                     data.carriageIndex(), train.id, targetPosition, targetOrientation);
@@ -1421,7 +1421,7 @@ public final class SableTrainController {
 
             Pose3d pose = data.subLevel().logicalPose();
             Quaterniond orientation = computeTargetOrientation(dce, pose, data.initialYaw());
-            Vector3d target = computeTargetPosition(data.subLevel(), dce.positionAnchor, orientation);
+            Vector3d target = computeBodyTargetPosition(data.subLevel(), data, dce.positionAnchor, orientation);
             targets.add(target);
             orientations.add(orientation);
 
@@ -2366,6 +2366,38 @@ public final class SableTrainController {
     }
 
     /**
+     * Body target including the suspension height of this carriage's bogeys. The wheel
+     * targets deliberately do not include this offset: the wheels stay on the rails while
+     * the carriage body rises or lowers on its suspension.
+     */
+    private static Vector3d computeBodyTargetPosition(ServerSubLevel subLevel, SubLevelData data,
+                                                      Vec3 anchor, Quaterniond orientation) {
+        Vector3d target = computeTargetPosition(subLevel, anchor, orientation);
+        double offset = suspensionOffsetFor(data);
+        if (Math.abs(offset) > 1.0e-5) {
+            Vector3d up = orientation.transform(new Vector3d(0.0, 1.0, 0.0));
+            target.fma(offset, up);
+        }
+        return target;
+    }
+
+    private static double suspensionOffsetFor(SubLevelData data) {
+        ServerSubLevel body = data.subLevel();
+        ServerLevel level = body.getLevel();
+        if (level == null) return 0.0;
+
+        double sum = 0.0;
+        int count = 0;
+        for (BogieInfo info : data.bogies()) {
+            SableBogeyBlockEntity block = bogeyBlock(level, info);
+            if (block == null) continue;
+            sum += block.getSuspensionOffset();
+            count++;
+        }
+        return count > 0 ? sum / count : 0.0;
+    }
+
+    /**
      * @return where a bogie sub-level has to be so that it stays rigidly attached to the body.
      */
     private static Vector3d localAnchorOffset(ServerSubLevel subLevel, Vector3dc centerOfMass) {
@@ -2693,7 +2725,7 @@ public final class SableTrainController {
             PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
 
             Quaterniond orientation = computeTargetOrientation(dce, body.logicalPose(), data.initialYaw());
-            Vector3d targetPosition = computeTargetPosition(body, dce.positionAnchor, orientation);
+            Vector3d targetPosition = computeBodyTargetPosition(body, data, dce.positionAnchor, orientation);
             if (!isFinite(targetPosition) || !isFinite(orientation)) {
                 LOGGER.warn("Sablenautics: refusing invalid rail target for train {} carriage {}",
                         train.id, index);

@@ -91,7 +91,7 @@ public class SableBogeyBlockEntityRenderer implements BlockEntityRenderer<SableB
         }
 
         if (glueFrame != null) {
-            renderGlue(poseStack, bufferSource, glueFrame, blockEntity.getSuspensionOffset());
+            renderGlue(poseStack, bufferSource, glueFrame);
             poseStack.translate(glueFrame.localDelta().x, glueFrame.localDelta().y, glueFrame.localDelta().z);
             poseStack.mulPose(new Quaternionf(glueFrame.localOrientation()));
         }
@@ -99,10 +99,6 @@ public class SableBogeyBlockEntityRenderer implements BlockEntityRenderer<SableB
         poseStack.translate(0.5f, 0.5f, 0.5f);
         if (state.getValue(AbstractBogeyBlock.AXIS) == Direction.Axis.X) {
             poseStack.mulPose(Axis.YP.rotationDegrees(90));
-        }
-        float suspensionOffset = blockEntity.getSuspensionOffset();
-        if (Math.abs(suspensionOffset) > 1.0e-4f) {
-            poseStack.translate(0.0f, suspensionOffset, 0.0f);
         }
         style.render(size, partialTick, poseStack, bufferSource, packedLight, packedOverlay,
                 spin.angle, blockEntity.getBogeyData(), false);
@@ -179,19 +175,18 @@ public class SableBogeyBlockEntityRenderer implements BlockEntityRenderer<SableB
      * the pose stack at this point.
      */
     private static void renderGlue(PoseStack poseStack, MultiBufferSource buffers,
-                                   GlueFrame frame, float suspensionOffset) {
+                                   GlueFrame frame) {
         Vector3d blockCenter = new Vector3d(0.5, 0.5, 0.5);
         Vector3d targetLocal = new Vector3d(blockCenter).add(frame.localDelta());
         Vector3d up = frame.localOrientation().transform(new Vector3d(0.0, 1.0, 0.0));
         Vector3d right = frame.localOrientation().transform(new Vector3d(1.0, 0.0, 0.0));
 
         // Keep the visible end on the wheel model (slightly below the rail target) and the
-        // other end on the Sable bogey block, so the glue visibly bridges the two. The wheel
-        // end follows the suspension height offset of this particular bogey.
+        // other end on the Sable bogey block, so the glue visibly bridges the two.
         Vec3 start = new Vec3(
-                targetLocal.x - up.x * 0.9 + up.x * suspensionOffset,
-                targetLocal.y - up.y * 0.9 + up.y * suspensionOffset,
-                targetLocal.z - up.z * 0.9 + up.z * suspensionOffset);
+                targetLocal.x - up.x * 0.9,
+                targetLocal.y - up.y * 0.9,
+                targetLocal.z - up.z * 0.9);
         Vec3 end = new Vec3(
                 blockCenter.x - up.x * 0.05,
                 blockCenter.y - up.y * 0.05,
