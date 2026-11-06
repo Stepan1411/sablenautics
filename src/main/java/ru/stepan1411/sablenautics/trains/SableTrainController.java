@@ -138,6 +138,8 @@ public final class SableTrainController {
      * has to follow that body's pose and velocity in addition to the track graph.
      */
     private static final String RAIL_FRAME_KEY = "sablenautics_rail_frame";
+    /** True when the carriage body faces opposite to its train's rail direction. */
+    private static final String BODY_REVERSED_KEY = "sablenautics_body_reversed";
     public static final String SABLE_TRAIN_KEY = "SablenauticsSableTrain";
     private static final String BOGIES_KEY = "sablenautics_bogies";
     private static final String RUN_OVER_KEY = "sablenautics_last_run_over";
@@ -345,6 +347,12 @@ public final class SableTrainController {
          * train with it, both in position and in rotation.
          */
         private @Nullable ServerSubLevel railFrame;
+        /**
+         * True when the carriage body ends up facing opposite to the graph direction, for
+         * example after being attached in the nearest of the two rail directions. Wheel spin
+         * and manual controls have to be inverted in that case.
+         */
+        private boolean bodyReversed;
 
         private SubLevelData(ServerSubLevel subLevel, UUID trainId, int carriageIndex,
                              float initialYaw, Direction assemblyDirection,
@@ -400,6 +408,10 @@ public final class SableTrainController {
          */
         public @Nullable ServerSubLevel railFrame() {
             return railFrame;
+        }
+
+        public boolean bodyReversed() {
+            return bodyReversed;
         }
 
         /**
@@ -465,6 +477,7 @@ public final class SableTrainController {
         bodyData.putString(ROLE_KEY, ROLE_BODY);
         bodyData.putBoolean(DETACHED_KEY, false);
         bodyData.putBoolean(FLEW_OFF_KEY, false);
+        bodyData.putBoolean(BODY_REVERSED_KEY, data.bodyReversed);
         bodyData.put(BOGIES_KEY, writeBogies(safeBogies));
         writeRailFrame(data, bodyData);
         subLevel.setUserDataTag(bodyData);
@@ -638,6 +651,7 @@ public final class SableTrainController {
         Pose3d pose = serverSubLevel.logicalPose();
         Vec3 anchor = dce.positionAnchor;
         Quaterniond targetOrientation = computeTargetOrientation(dce, pose, data.initialYaw());
+        data.bodyReversed = isTargetReversed(dce, pose, data.initialYaw(), targetOrientation);
         Vector3d targetPosition = computeBodyTargetPosition(serverSubLevel, data, anchor, targetOrientation);
         // Rails may live inside another Sable sub-level (a moving/rotating platform). In that
         // case the whole rail frame moves the train: transform the graph-space target into
@@ -1539,6 +1553,7 @@ public final class SableTrainController {
 
             Pose3d pose = data.subLevel().logicalPose();
             Quaterniond orientation = computeTargetOrientation(dce, pose, data.initialYaw());
+            data.bodyReversed = isTargetReversed(dce, pose, data.initialYaw(), orientation);
             Vector3d target = computeBodyTargetPosition(data.subLevel(), data, dce.positionAnchor, orientation);
             applyRailFrame(data, level, dce.positionAnchor, target, orientation);
             targets.add(target);
@@ -1965,6 +1980,14 @@ public final class SableTrainController {
             }
         }
         return null;
+    }
+
+    /**
+     * @return true when this carriage's body faces opposite to the train's rail direction
+     */
+    public static boolean isBodyReversed(Train train, int carriageIndex) {
+        SubLevelData data = dataFor(train, carriageIndex);
+        return data != null && data.bodyReversed;
     }
 
     /**
@@ -2628,7 +2651,10 @@ public final class SableTrainController {
         return train.speedBeforeStall == null;
     }
 
-    private static Quaterniond computeTargetOrientation(DimensionalCarriageEntity dce, Pose3d pose, float initialYaw) {
+    /**
+     * Orientation that follows the graph direction exactly (no nearest-direction choice).
+     */
+    private static Quaterniond graphAlignedOrientation(DimensionalCarriageEntity dce, Pose3d pose, float initialYaw) {
         if (dce.rotationAnchors.either(Objects::isNull)) {
             return new Quaterniond(pose.orientation());
         }
@@ -2641,10 +2667,17 @@ public final class SableTrainController {
         double yaw = Math.atan2(diffZ, diffX) * 180 / Math.PI + 180;
         double pitch = -Math.atan2(diffY, Math.sqrt(diffX * diffX + diffZ * diffZ)) * 180 / Math.PI;
         // OrientedContraptionEntity#getViewYRot returns -yaw, getViewXRot returns +pitch.
-        Quaterniond base = new Quaterniond()
+        return new Quaterniond()
                 .rotateY(Math.toRadians(-yaw))
                 .rotateZ(Math.toRadians(pitch))
                 .rotateY(Math.toRadians(initialYaw));
+    }
+
+    private static Quaterniond computeTargetOrientation(DimensionalCarriageEntity dce, Pose3d pose, float initialYaw) {
+        Quaterniond base = graphAlignedOrientation(dce, pose, initialYaw);
+        if (dce.rotationAnchors.either(Objects::isNull)) {
+            return base;
+        }
 
         // A rail is a line: the carriage may face either way along it. The anchor order can be
         // reversed after a detach, which would make the target 180 degrees away and visibly
@@ -2654,6 +2687,16 @@ public final class SableTrainController {
         Quaterniond current = new Quaterniond(pose.orientation());
         return orientationAngle(base, current) <= orientationAngle(flipped, current)
                 ? base : flipped;
+    }
+
+    /**
+     * @return true when the chosen orientation points away from the graph direction
+     */
+    private static boolean isTargetReversed(DimensionalCarriageEntity dce, Pose3d pose,
+                                            float initialYaw, Quaterniondc chosen) {
+        if (dce.rotationAnchors.either(Objects::isNull)) return false;
+        Quaterniond base = graphAlignedOrientation(dce, pose, initialYaw);
+        return orientationAngle(base, chosen) > Math.PI / 2.0;
     }
 
     /**
@@ -3005,6 +3048,11 @@ public final class SableTrainController {
                 applyBogieAngles(bogieOrientation, carriageBogey(carriage, bogieIndex), train, dce);
 
                 float angleDelta = (float) (360.0 * train.speed / (Math.PI * 2.0 * info.wheelRadius()));
+                if (data.bodyReversed()) {
+                    // The body faces against the train's travel direction, so the wheels must
+                    // rotate the other way to look like they are rolling on the rails.
+                    angleDelta = -angleDelta;
+                }
                 return new BogieTarget(new Vec3(world.x, world.y, world.z), bogieOrientation, angleDelta,
                         attachmentWorld, true);
             }
@@ -3211,6 +3259,7 @@ public final class SableTrainController {
             PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
 
             Quaterniond orientation = computeTargetOrientation(dce, body.logicalPose(), data.initialYaw());
+            data.bodyReversed = isTargetReversed(dce, body.logicalPose(), data.initialYaw(), orientation);
             Vector3d targetPosition = computeBodyTargetPosition(body, data, dce.positionAnchor, orientation);
             applyRailFrame(data, level, dce.positionAnchor, targetPosition, orientation);
             if (!isFinite(targetPosition) || !isFinite(orientation)) {
@@ -4124,6 +4173,7 @@ public final class SableTrainController {
         data.detached = userData.getBoolean(DETACHED_KEY);
         data.flewOff = userData.getBoolean(FLEW_OFF_KEY);
         data.autoAttachTrigger = !userData.contains(AUTO_ATTACH_KEY) || userData.getBoolean(AUTO_ATTACH_KEY);
+        data.bodyReversed = userData.getBoolean(BODY_REVERSED_KEY);
         if (userData.contains(FLY_OFF_ANCHOR_X_KEY)) {
             data.flyOffAnchor = new Vec3(userData.getDouble(FLY_OFF_ANCHOR_X_KEY),
                     userData.getDouble(FLY_OFF_ANCHOR_Y_KEY),
@@ -4168,6 +4218,7 @@ public final class SableTrainController {
         bodyData.putBoolean(DETACHED_KEY, data.detached);
         bodyData.putBoolean(FLEW_OFF_KEY, data.flewOff);
         bodyData.putBoolean(AUTO_ATTACH_KEY, data.autoAttachTrigger);
+        bodyData.putBoolean(BODY_REVERSED_KEY, data.bodyReversed);
         writeRailFrame(data, bodyData);
 
         Vec3 anchor = data.flyOffAnchor;

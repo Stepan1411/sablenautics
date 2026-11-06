@@ -114,6 +114,7 @@ public final class ClientSableTrainControls {
         if (trainId == null || !trainId.equals(payload.trainId())) return;
         derailed = payload.derailed();
         trainYaw = payload.yaw();
+        inverted = payload.inverted();
     }
 
     @SubscribeEvent

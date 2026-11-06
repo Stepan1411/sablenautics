@@ -144,9 +144,13 @@ public final class SableTrainControlManager {
         BY_TRAIN.put(train.id, session);
         PLAYER_TRAIN.put(player.getUUID(), train.id);
 
-        SablenauticsNetwork.sendStartControl(player, train.id, data.carriageIndex(), inverted);
+        boolean effectiveInverted = inverted
+                ^ SableTrainController.isBodyReversed(train, data.carriageIndex());
+
+        SablenauticsNetwork.sendStartControl(player, train.id, data.carriageIndex(), effectiveInverted);
         SablenauticsNetwork.sendControlStatus(player, train.id, train.derailed,
-                SableTrainController.carriageYaw(level, train.carriages.get(data.carriageIndex())));
+                SableTrainController.carriageYaw(level, train.carriages.get(data.carriageIndex())),
+                effectiveInverted);
         LOGGER.info("Sablenautics: {} started controlling train {} via sublevel {}",
                 player.getGameProfile().getName(), train.id, data.subLevel().getUniqueId());
         return true;
@@ -206,11 +210,13 @@ public final class SableTrainControlManager {
 
         if (session.carriageIndex < 0 || session.carriageIndex >= train.carriages.size()) return false;
         Carriage carriage = train.carriages.get(session.carriageIndex);
+        boolean inverted = session.inverted
+                ^ SableTrainController.isBodyReversed(train, session.carriageIndex);
 
         if (session.hudCooldown-- <= 0) {
             CatnipServices.NETWORK.sendToClient(player, new TrainHUDUpdatePacket.Clientbound(train));
             SablenauticsNetwork.sendControlStatus(player, train.id, train.derailed,
-                    SableTrainController.carriageYaw(player.serverLevel(), carriage));
+                    SableTrainController.carriageYaw(player.serverLevel(), carriage), inverted);
             session.hudCooldown = HUD_INTERVAL;
         }
 
@@ -222,14 +228,14 @@ public final class SableTrainControlManager {
 
         int targetSpeed = (session.pressed(0) ? 1 : 0) - (session.pressed(1) ? 1 : 0);
         int targetSteer = (session.pressed(2) ? 1 : 0) - (session.pressed(3) ? 1 : 0);
-        if (session.inverted) {
+        if (inverted) {
             targetSpeed *= -1;
             targetSteer *= -1;
         }
 
         if (targetSpeed != 0) train.burnFuel();
 
-        boolean slow = session.inverted ^ targetSpeed < 0;
+        boolean slow = inverted ^ targetSpeed < 0;
         boolean spaceDown = session.pressed(4);
 
         GlobalStation currentStation = train.getCurrentStation();
@@ -275,7 +281,7 @@ public final class SableTrainControlManager {
 
             double directedSpeed = targetSpeed != 0 ? targetSpeed : train.speed;
             GlobalStation lookAhead = nav.findNearestApproachable(
-                    !train.doubleEnded || (directedSpeed != 0 ? directedSpeed > 0 : !session.inverted));
+                    !train.doubleEnded || (directedSpeed != 0 ? directedSpeed > 0 : !inverted));
             if (lookAhead != null && spaceDown) {
                 train.manualTick = true;
                 nav.startNavigation(nav.findPathTo(lookAhead, -1));
@@ -335,4 +341,3 @@ public final class SableTrainControlManager {
         PLAYER_TRAIN.clear();
     }
 }
-

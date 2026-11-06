@@ -67,9 +67,10 @@ public final class SablenauticsNetwork {
                 new TrainControlStartPayload(trainId, carriageIndex, inverted));
     }
 
-    public static void sendControlStatus(ServerPlayer player, UUID trainId, boolean derailed, float yaw) {
+    public static void sendControlStatus(ServerPlayer player, UUID trainId, boolean derailed, float yaw,
+                                         boolean inverted) {
         PacketDistributor.sendToPlayer(player,
-                new TrainControlStatusPayload(trainId, derailed, yaw));
+                new TrainControlStatusPayload(trainId, derailed, yaw, inverted));
     }
 
     public static void sendStopControl(ServerPlayer player, UUID trainId) {
