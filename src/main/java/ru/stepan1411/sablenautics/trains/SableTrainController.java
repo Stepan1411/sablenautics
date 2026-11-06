@@ -653,6 +653,34 @@ public final class SableTrainController {
         Vector3d plotTarget = new Vector3d(targetPosition);
         applyRailFrame(data, serverLevel, anchor, targetPosition, targetOrientation);
 
+        // Recovery: an earlier build could strand a freshly assembled body at Sable's plot
+        // coordinates while its rail target is a normal world position. Pull it back to the
+        // rails once instead of leaving it unreachable forever.
+        if (!data.detached && isInPlotGrid(serverLevel, pose.position())
+                && !isInPlotGrid(serverLevel, targetPosition)) {
+            SubLevelPhysicsSystem rescuePhysics = SubLevelPhysicsSystem.get(serverLevel);
+            PhysicsPipeline rescuePipeline = rescuePhysics != null ? rescuePhysics.getPipeline() : null;
+            if (rescuePipeline != null) {
+                teleport(serverSubLevel, targetPosition, targetOrientation, rescuePipeline);
+                ensureRailJoint(data, serverSubLevel, rescuePipeline, targetPosition, targetOrientation);
+            } else {
+                pose.position().set(targetPosition);
+                pose.orientation().set(targetOrientation);
+                serverSubLevel.latestLinearVelocity.zero();
+                serverSubLevel.latestAngularVelocity.zero();
+            }
+            data.detached = false;
+            data.initialized = true;
+            data.hasTarget = true;
+            data.attachGraceUntil = serverLevel.getGameTime() + 20;
+            resetTargetTracking(data, targetPosition, targetOrientation, serverLevel);
+            writeDetachedFlag(data);
+            LOGGER.warn("Sablenautics: carriage {} of train {} was stranded in the plot grid; moved it to {}",
+                    data.carriageIndex(), train.id, targetPosition);
+            syncBogieBlocks(serverSubLevel, data);
+            return;
+        }
+
         // If the target is still inside Sable's plot grid, no rail frame was resolved. Moving
         // the body there would teleport it to the plot coordinates in the open world, which
         // looks like the train never attaches. Keep it in place instead.
