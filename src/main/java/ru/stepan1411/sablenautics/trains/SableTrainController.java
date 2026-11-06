@@ -140,6 +140,17 @@ public final class SableTrainController {
     private static final String RAIL_FRAME_KEY = "sablenautics_rail_frame";
     /** True when the carriage body faces opposite to its train's rail direction. */
     private static final String BODY_REVERSED_KEY = "sablenautics_body_reversed";
+    private static final String WORLD_GRAPH_FRAME_KEY = "sablenautics_world_graph_frame";
+    private static final String FRAME_REF_PX = "sablenautics_frame_ref_px";
+    private static final String FRAME_REF_PY = "sablenautics_frame_ref_py";
+    private static final String FRAME_REF_PZ = "sablenautics_frame_ref_pz";
+    private static final String FRAME_REF_RX = "sablenautics_frame_ref_rx";
+    private static final String FRAME_REF_RY = "sablenautics_frame_ref_ry";
+    private static final String FRAME_REF_RZ = "sablenautics_frame_ref_rz";
+    private static final String FRAME_REF_QX = "sablenautics_frame_ref_qx";
+    private static final String FRAME_REF_QY = "sablenautics_frame_ref_qy";
+    private static final String FRAME_REF_QZ = "sablenautics_frame_ref_qz";
+    private static final String FRAME_REF_QW = "sablenautics_frame_ref_qw";
     public static final String SABLE_TRAIN_KEY = "SablenauticsSableTrain";
     private static final String BOGIES_KEY = "sablenautics_bogies";
     private static final String RUN_OVER_KEY = "sablenautics_last_run_over";
@@ -349,6 +360,13 @@ public final class SableTrainController {
         private @Nullable ServerSubLevel railFrame;
         /** Next tick at which a missing rail frame may be re-detected from the body position. */
         private long nextFrameProbeTick;
+        /**
+         * True when the track graph is stored in world coordinates even though the rail blocks
+         * were moved into a Sable platform's plot. In that case only the platform's motion
+         * since the reference pose is applied to the graph target.
+         */
+        private boolean worldGraphFrame;
+        private @Nullable Pose3d graphReferencePose;
         /**
          * True when the carriage body ends up facing opposite to the graph direction, for
          * example after being attached in the nearest of the two rail directions. Wheel spin
@@ -1425,13 +1443,10 @@ public final class SableTrainController {
             if (otherBody.isRemoved()) continue;
 
             Pose3d pose = otherBody.logicalPose();
-            ServerSubLevel frame = other.railFrame;
             for (BogieInfo bogie : other.bogies()) {
                 Vector3d world = pose.transformPosition(bogie.localPlotCenter(), new Vector3d());
                 Vec3 point = new Vec3(world.x, world.y, world.z);
-                if (frame != null && !frame.isRemoved()) {
-                    point = worldToTrackSpace(frame, point);
-                }
+                point = worldToGraphPoint(other, point);
                 bogieProbes.add(new BogieProbe(other, point));
             }
         }
@@ -1460,10 +1475,7 @@ public final class SableTrainController {
             Vector3d rearWorld = rearData.subLevel().logicalPose()
                     .transformPosition(rearBogie.localPlotCenter(), new Vector3d());
             Vec3 rearPoint = new Vec3(rearWorld.x, rearWorld.y, rearWorld.z);
-            ServerSubLevel rearFrame = rearData.railFrame;
-            if (rearFrame != null && !rearFrame.isRemoved()) {
-                rearPoint = worldToTrackSpace(rearFrame, rearPoint);
-            }
+            rearPoint = worldToGraphPoint(rearData, rearPoint);
             rearPoint = rearPoint.subtract(direction.scale(rearBogie.wheelPointSpacing() * 0.5));
             if (hasTrackNearby(level, rearPoint, TRACK_SEARCH_RADIUS)) {
                 TrackPoint rearCandidate = findNearestTrackPoint(level, rearPoint, TRACK_SEARCH_RADIUS);
@@ -1873,10 +1885,7 @@ public final class SableTrainController {
         if (leading.edge != null && trailing.edge != null) {
             Vec3 forward = leading.getPosition(train.graph).subtract(trailing.getPosition(train.graph));
             if (forward.lengthSqr() > 1.0e-8) {
-                ServerSubLevel frame = data.railFrame;
-                if (frame != null && !frame.isRemoved()) {
-                    forward = frame.logicalPose().transformNormal(forward);
-                }
+                forward = graphNormalToWorld(data, forward);
                 return forward.normalize();
             }
         }
@@ -2195,9 +2204,7 @@ public final class SableTrainController {
      * have to happen in the same frame.
      */
     private static Vec3 toTrackSpace(SubLevelData data, Vec3 worldDirection) {
-        ServerSubLevel frame = data.railFrame;
-        if (frame == null || frame.isRemoved()) return worldDirection;
-        return frame.logicalPose().transformNormalInverse(worldDirection);
+        return worldNormalToGraph(data, worldDirection);
     }
 
     /**
@@ -2460,6 +2467,10 @@ public final class SableTrainController {
      */
     private static void updateWallObstruction(Train train, SubLevelData data, ServerSubLevel body,
                                               ServerLevel level, Pose3d pose) {
+        // A world-graph train running on a platform exists outside the platform's plot in the
+        // world; probing world blocks here would only hit unrelated terrain.
+        if (data.worldGraphFrame) return;
+
         Vec3 forward = railForward(train, data);
         if (forward.lengthSqr() < 1.0e-8) return;
 
@@ -2717,10 +2728,7 @@ public final class SableTrainController {
 
         Vector3d axis = new Vector3d(forward.x, forward.y, forward.z).normalize();
         Vec3 plotAnchor = dce.positionAnchor;
-        ServerSubLevel frame = data.railFrame;
-        Vec3 anchorWorld = frame != null && !frame.isRemoved()
-                ? frame.logicalPose().transformPosition(plotAnchor)
-                : plotAnchor;
+        Vec3 anchorWorld = graphPointToWorld(data, plotAnchor);
         double result = new Vector3d(bodyAnchor)
                 .sub(new Vector3d(anchorWorld.x, anchorWorld.y, anchorWorld.z))
                 .dot(axis);
@@ -2850,13 +2858,16 @@ public final class SableTrainController {
                             data.carriageIndex(), data.trainId, containing.getUniqueId());
                 }
                 data.railFrame = containing;
+                data.worldGraphFrame = false;
+                data.graphReferencePose = null;
                 return containing;
             }
-            // The graph anchor is not inside any plot. For world rails this is normal; only
-            // try to recover a frame when the anchor itself is in Sable's plot grid.
+            // The graph anchor is not inside any plot. This is normal for plain world rails,
+            // but it also happens when rails were moved into a Sable platform while their
+            // track graph stayed in world coordinates. Probe the body occasionally and, if it
+            // is physically on a platform, remember that platform and its reference pose.
             long now = level != null ? level.getGameTime() : 0L;
-            if (level != null && isInPlotGrid(level, new Vector3d(plotAnchor.x, plotAnchor.y, plotAnchor.z))
-                    && now >= data.nextFrameProbeTick) {
+            if (level != null && now >= data.nextFrameProbeTick) {
                 data.nextFrameProbeTick = now + 10L;
                 Vector3dc bodyPosition = data.subLevel().logicalPose().position();
                 ServerSubLevel detected = findRailFrameForWorldPoint(level,
@@ -2864,10 +2875,19 @@ public final class SableTrainController {
                         data.trainId, data.subLevel());
                 if (detected != null) {
                     if (previous != detected) {
-                        LOGGER.info("Sablenautics: carriage {} of train {} detected rail frame {} from its body",
+                        LOGGER.info("Sablenautics: carriage {} of train {} detected world-graph rail frame {} from its body",
                                 data.carriageIndex(), data.trainId, detected.getUniqueId());
                     }
                     data.railFrame = detected;
+                    data.worldGraphFrame = true;
+                    if (data.graphReferencePose == null) {
+                        data.graphReferencePose = new Pose3d(detected.logicalPose());
+                        CompoundTag frameData = data.subLevel().getUserDataTag();
+                        if (frameData != null) {
+                            writeRailFrame(data, frameData);
+                            data.subLevel().setUserDataTag(frameData);
+                        }
+                    }
                     return detected;
                 }
             }
@@ -2876,6 +2896,8 @@ public final class SableTrainController {
                         data.carriageIndex(), data.trainId, previous.getUniqueId());
             }
             data.railFrame = null;
+            data.worldGraphFrame = false;
+            data.graphReferencePose = null;
             return null;
         }
 
@@ -2972,18 +2994,85 @@ public final class SableTrainController {
         if (frame == null) return;
 
         Pose3d framePose = frame.logicalPose();
+        if (data.worldGraphFrame && data.graphReferencePose != null) {
+            // The graph is still in world coordinates, but the rail blocks were moved into the
+            // platform. Apply only the platform motion since the reference pose.
+            Pose3d reference = data.graphReferencePose;
+            Vector3d local = reference.transformPositionInverse(targetPosition, new Vector3d());
+            targetPosition.set(framePose.transformPosition(local, new Vector3d()));
+            Quaterniond delta = new Quaterniond(framePose.orientation())
+                    .mul(new Quaterniond(reference.orientation()).conjugate());
+            targetOrientation.set(delta.mul(targetOrientation));
+            return;
+        }
+
         targetPosition.set(framePose.transformPosition(targetPosition, new Vector3d()));
         targetOrientation.set(new Quaterniond(framePose.orientation()).mul(targetOrientation));
+    }
+
+    /**
+     * Converts a point from the train's track-graph space to its visual world position.
+     * Plot-graph rails use the frame pose directly; world-graph rails on a platform use only
+     * the platform motion since the reference pose.
+     */
+    private static Vec3 graphPointToWorld(SubLevelData data, Vec3 point) {
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null || frame.isRemoved()) return point;
+        Pose3d framePose = frame.logicalPose();
+        if (data.worldGraphFrame && data.graphReferencePose != null) {
+            Vector3d local = data.graphReferencePose.transformPositionInverse(
+                    new Vector3d(point.x, point.y, point.z), new Vector3d());
+            Vector3d world = framePose.transformPosition(local, new Vector3d());
+            return new Vec3(world.x, world.y, world.z);
+        }
+        return framePose.transformPosition(point);
+    }
+
+    private static Vec3 worldToGraphPoint(SubLevelData data, Vec3 point) {
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null || frame.isRemoved()) return point;
+        Pose3d framePose = frame.logicalPose();
+        if (data.worldGraphFrame && data.graphReferencePose != null) {
+            Vector3d local = framePose.transformPositionInverse(
+                    new Vector3d(point.x, point.y, point.z), new Vector3d());
+            Vector3d graph = data.graphReferencePose.transformPosition(local, new Vector3d());
+            return new Vec3(graph.x, graph.y, graph.z);
+        }
+        return framePose.transformPositionInverse(point);
+    }
+
+    private static Vec3 graphNormalToWorld(SubLevelData data, Vec3 normal) {
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null || frame.isRemoved()) return normal;
+        Pose3d framePose = frame.logicalPose();
+        if (data.worldGraphFrame && data.graphReferencePose != null) {
+            Quaterniond delta = new Quaterniond(framePose.orientation())
+                    .mul(new Quaterniond(data.graphReferencePose.orientation()).conjugate());
+            Vector3d out = delta.transform(new Vector3d(normal.x, normal.y, normal.z), new Vector3d());
+            return new Vec3(out.x, out.y, out.z);
+        }
+        return framePose.transformNormal(normal);
+    }
+
+    private static Vec3 worldNormalToGraph(SubLevelData data, Vec3 normal) {
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null || frame.isRemoved()) return normal;
+        Pose3d framePose = frame.logicalPose();
+        if (data.worldGraphFrame && data.graphReferencePose != null) {
+            Quaterniond delta = new Quaterniond(framePose.orientation())
+                    .mul(new Quaterniond(data.graphReferencePose.orientation()).conjugate());
+            Vector3d out = delta.transformInverse(new Vector3d(normal.x, normal.y, normal.z), new Vector3d());
+            return new Vec3(out.x, out.y, out.z);
+        }
+        return framePose.transformNormalInverse(normal);
     }
 
     /**
      * @return yaw (degrees) of the rail frame in world space, used by the controls HUD
      */
     private static float frameYaw(SubLevelData data) {
-        ServerSubLevel frame = data.railFrame;
-        if (frame == null || frame.isRemoved()) return 0.0f;
-        Vector3d forward = frame.logicalPose().orientation()
-                .transform(new Vector3d(1.0, 0.0, 0.0), new Vector3d());
+        if (data.railFrame == null || data.railFrame.isRemoved()) return 0.0f;
+        Vec3 forward = graphNormalToWorld(data, new Vec3(1.0, 0.0, 0.0));
         if (forward.x * forward.x + forward.z * forward.z < 1.0e-6) return 0.0f;
         return (float) (Math.atan2(forward.z, forward.x) * 180.0 / Math.PI);
     }
@@ -4324,6 +4413,18 @@ public final class SableTrainController {
                 data.railFrame = frame;
             }
         }
+        data.worldGraphFrame = userData.getBoolean(WORLD_GRAPH_FRAME_KEY);
+        if (data.worldGraphFrame && userData.contains(FRAME_REF_PX)) {
+            Pose3d reference = new Pose3d();
+            reference.position().set(userData.getDouble(FRAME_REF_PX),
+                    userData.getDouble(FRAME_REF_PY), userData.getDouble(FRAME_REF_PZ));
+            reference.rotationPoint().set(userData.getDouble(FRAME_REF_RX),
+                    userData.getDouble(FRAME_REF_RY), userData.getDouble(FRAME_REF_RZ));
+            reference.orientation().set(userData.getDouble(FRAME_REF_QX),
+                    userData.getDouble(FRAME_REF_QY), userData.getDouble(FRAME_REF_QZ),
+                    userData.getDouble(FRAME_REF_QW));
+            data.graphReferencePose = reference;
+        }
         // A detached carriage keeps the pose it was saved with; an attached one is aligned once.
         data.initialized = data.detached;
         if (data.detached && subLevel.getLevel() != null) {
@@ -4346,6 +4447,27 @@ public final class SableTrainController {
             tag.putUUID(RAIL_FRAME_KEY, frame.getUniqueId());
         } else {
             tag.remove(RAIL_FRAME_KEY);
+        }
+
+        tag.putBoolean(WORLD_GRAPH_FRAME_KEY, data.worldGraphFrame);
+        Pose3d reference = data.graphReferencePose;
+        if (data.worldGraphFrame && reference != null) {
+            tag.putDouble(FRAME_REF_PX, reference.position().x());
+            tag.putDouble(FRAME_REF_PY, reference.position().y());
+            tag.putDouble(FRAME_REF_PZ, reference.position().z());
+            tag.putDouble(FRAME_REF_RX, reference.rotationPoint().x());
+            tag.putDouble(FRAME_REF_RY, reference.rotationPoint().y());
+            tag.putDouble(FRAME_REF_RZ, reference.rotationPoint().z());
+            tag.putDouble(FRAME_REF_QX, reference.orientation().x());
+            tag.putDouble(FRAME_REF_QY, reference.orientation().y());
+            tag.putDouble(FRAME_REF_QZ, reference.orientation().z());
+            tag.putDouble(FRAME_REF_QW, reference.orientation().w());
+        } else {
+            for (String key : new String[]{FRAME_REF_PX, FRAME_REF_PY, FRAME_REF_PZ,
+                    FRAME_REF_RX, FRAME_REF_RY, FRAME_REF_RZ,
+                    FRAME_REF_QX, FRAME_REF_QY, FRAME_REF_QZ, FRAME_REF_QW}) {
+                tag.remove(key);
+            }
         }
     }
 
