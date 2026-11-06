@@ -1520,6 +1520,7 @@ public final class SableTrainController {
         double preservedSpeed = currentForwardSpeed(train);
         double maxError = 0.0;
         double maxAngle = 0.0;
+        double minUpDot = 1.0;
         List<Vector3d> targets = new ArrayList<>(train.carriages.size());
         List<Quaterniond> orientations = new ArrayList<>(train.carriages.size());
 
@@ -1545,6 +1546,10 @@ public final class SableTrainController {
 
             maxError = Math.max(maxError, pose.position().distance(target));
             maxAngle = Math.max(maxAngle, orientationAngle(pose.orientation(), orientation));
+
+            Vector3d bodyUp = pose.orientation().transform(new Vector3d(0.0, 1.0, 0.0), new Vector3d());
+            Vector3d targetUp = orientation.transform(new Vector3d(0.0, 1.0, 0.0), new Vector3d());
+            minUpDot = Math.min(minUpDot, bodyUp.dot(targetUp));
         }
 
         if (targets.size() > 1) {
@@ -1570,9 +1575,10 @@ public final class SableTrainController {
         }
 
         attachNow(train, level, targets, orientations, preservedSpeed);
-        LOGGER.info("Sablenautics: train {} snapped onto the rails (error {}, angle {})",
+        LOGGER.info("Sablenautics: train {} snapped onto the rails (error {}, angle {}, upDot {})",
                 train.id, String.format("%.2f", maxError),
-                String.format("%.1f", Math.toDegrees(maxAngle)));
+                String.format("%.1f", Math.toDegrees(maxAngle)),
+                String.format("%.2f", minUpDot));
         return true;
     }
 
@@ -2635,10 +2641,19 @@ public final class SableTrainController {
         double yaw = Math.atan2(diffZ, diffX) * 180 / Math.PI + 180;
         double pitch = -Math.atan2(diffY, Math.sqrt(diffX * diffX + diffZ * diffZ)) * 180 / Math.PI;
         // OrientedContraptionEntity#getViewYRot returns -yaw, getViewXRot returns +pitch.
-        return new Quaterniond()
+        Quaterniond base = new Quaterniond()
                 .rotateY(Math.toRadians(-yaw))
                 .rotateZ(Math.toRadians(pitch))
                 .rotateY(Math.toRadians(initialYaw));
+
+        // A rail is a line: the carriage may face either way along it. The anchor order can be
+        // reversed after a detach, which would make the target 180 degrees away and visibly
+        // flip the train during attachment. Pick the direction closest to the current body.
+        Quaterniond flipped = new Quaterniond(base)
+                .mul(new Quaterniond().rotateY(Math.PI));
+        Quaterniond current = new Quaterniond(pose.orientation());
+        return orientationAngle(base, current) <= orientationAngle(flipped, current)
+                ? base : flipped;
     }
 
     /**
