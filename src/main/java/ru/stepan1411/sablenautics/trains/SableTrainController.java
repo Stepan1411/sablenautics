@@ -1391,6 +1391,8 @@ public final class SableTrainController {
      * for a physics approach made re-railing feel unresponsive.
      */
     private static boolean beginAttachment(Train train, ServerLevel level) {
+        double maxError = 0.0;
+        double maxAngle = 0.0;
         List<Vector3d> targets = new ArrayList<>(train.carriages.size());
         List<Quaterniond> orientations = new ArrayList<>(train.carriages.size());
 
@@ -1412,6 +1414,9 @@ public final class SableTrainController {
             Vector3d target = computeBodyTargetPosition(data.subLevel(), data, dce.positionAnchor, orientation);
             targets.add(target);
             orientations.add(orientation);
+
+            maxError = Math.max(maxError, pose.position().distance(target));
+            maxAngle = Math.max(maxAngle, orientationAngle(pose.orientation(), orientation));
         }
 
         if (targets.size() > 1) {
@@ -1424,6 +1429,15 @@ public final class SableTrainController {
                 LOGGER.warn("Sablenautics: refusing collapsed attachment layout for train {}", train.id);
                 return false;
             }
+        }
+
+        // Only attach when the wheels/body are actually next to the found rails. Otherwise a
+        // train flying past a distant track would be teleported onto it.
+        if (maxError > AUTO_ATTACH_DISTANCE || maxAngle > AUTO_ATTACH_ANGLE) {
+            LOGGER.debug("Sablenautics: train {} is too far from the rail target (error {}, angle {})",
+                    train.id, String.format("%.2f", maxError),
+                    String.format("%.1f", Math.toDegrees(maxAngle)));
+            return false;
         }
 
         attachNow(train, level, targets, orientations);
