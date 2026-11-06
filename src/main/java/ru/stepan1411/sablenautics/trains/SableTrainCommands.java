@@ -59,8 +59,13 @@ public final class SableTrainCommands {
             return 0;
         }
 
-        Vec3 direction = lookDirection(source);
-        BlockPos trackBlock = findTrack(source, level);
+        Vec3 look = lookDirection(source);
+        Vec3 direction = look;
+        TrackSearch search = findTrack(source, level);
+        BlockPos trackBlock = search != null ? search.pos() : null;
+        if (search != null) {
+            direction = search.direction();
+        }
 
         if (trackBlock != null) {
             if (!SableTrainController.relocateToTrackBlock(nearest, level, trackBlock, direction)) {
@@ -86,12 +91,14 @@ public final class SableTrainCommands {
                 var pos = body.logicalPose().position();
                 Vec3 point = new Vec3(pos.x(), pos.y(), pos.z());
                 ServerSubLevel frame = SableTrainController.railFrameFor(body);
+                Vec3 fallbackDirection = direction;
                 if (frame != null) {
                     // Rail graph coordinates, not world coordinates.
                     point = frame.logicalPose().transformPositionInverse(point);
+                    fallbackDirection = frame.logicalPose().transformNormalInverse(look);
                 }
                 recovered = SableTrainController.relocateToNearestTrack(nearest, level,
-                        point, direction, 12.0);
+                        point, fallbackDirection, 12.0);
             }
 
             if (!recovered) {
@@ -118,12 +125,6 @@ public final class SableTrainCommands {
      * @return the Sable train with a carriage closest to {@code origin} in this dimension
      */
     private static @Nullable Train nearestTrain(Vec3 origin, ServerLevel level) {
-        // When the command runs from inside a Sable sub-level, the player's position is in that
-        // sub-level's plot space. Compare carriage bodies in the same space so trains riding on
-        // the platform can be found too.
-        SubLevel playerFrame = Sable.HELPER.getContaining(level,
-                new org.joml.Vector3d(origin.x, origin.y, origin.z));
-
         double bestDistance = Double.MAX_VALUE;
         Train nearest = null;
 
@@ -134,17 +135,6 @@ public final class SableTrainCommands {
 
                 double distance = subLevel.logicalPose().position()
                         .distanceSquared(origin.x, origin.y, origin.z);
-                if (playerFrame == subLevel) {
-                    // The player is standing inside this very carriage body.
-                    distance = 0.0;
-                } else if (playerFrame != null) {
-                    // Inverse-project the body into the plot the player is standing in.
-                    Vec3 plot = playerFrame.logicalPose().transformPositionInverse(
-                            new Vec3(subLevel.logicalPose().position().x(),
-                                    subLevel.logicalPose().position().y(),
-                                    subLevel.logicalPose().position().z()));
-                    distance = plot.distanceToSqr(origin);
-                }
                 if (distance < bestDistance) {
                     bestDistance = distance;
                     nearest = train;
@@ -157,40 +147,104 @@ public final class SableTrainCommands {
 
     private static Vec3 lookDirection(CommandSourceStack source) {
         Entity entity = source.getEntity();
-        Vec3 direction = entity != null ? entity.getLookAngle()
-                : Vec3.directionFromRotation(source.getRotation());
-        if (entity != null) {
-            SubLevel frame = Sable.HELPER.getContaining(entity);
-            if (frame != null) {
-                // Track graphs inside a sub-level are stored in its local coordinates.
-                direction = frame.logicalPose().transformNormalInverse(direction);
-            }
-        }
-        return direction;
+        if (entity != null) return entity.getLookAngle();
+        return Vec3.directionFromRotation(source.getRotation());
+    }
+
+    private record TrackSearch(BlockPos pos, Vec3 direction) {
     }
 
     /**
-     * @return the track block the executor is looking at, or the closest track around them
+     * Finds the rail the executor is looking at, or the closest rail around them. Rails can be
+     * part of a Sable sub-level (a platform); in that case the search runs in the plot space of
+     * that sub-level and the look direction is converted the same way.
      */
-    private static @Nullable BlockPos findTrack(CommandSourceStack source, ServerLevel level) {
+    private static @Nullable TrackSearch findTrack(CommandSourceStack source, ServerLevel level) {
         Entity entity = source.getEntity();
+        Vec3 look = lookDirection(source);
+
         if (entity != null) {
             HitResult hit = entity.pick(32.0, 0.0F, false);
-            if (hit instanceof BlockHitResult blockHit
-                    && level.getBlockState(blockHit.getBlockPos()).getBlock() instanceof ITrackBlock) {
-                return blockHit.getBlockPos();
+            if (hit instanceof BlockHitResult blockHit && isTrack(level, blockHit.getBlockPos())) {
+                ServerSubLevel frame = subLevelAt(level, blockHit.getBlockPos());
+                Vec3 direction = frame != null
+                        ? frame.logicalPose().transformNormalInverse(look)
+                        : look;
+                return new TrackSearch(blockHit.getBlockPos(), direction);
             }
         }
 
-        Vec3 origin = source.getPosition();
-        BlockPos center = BlockPos.containing(origin);
+        // Standing on (or riding inside) a Sable sub-level: search its plot for rails.
+        ServerSubLevel frame = playerRailFrame(entity, level);
+        if (frame != null) {
+            Vec3 local = frame.logicalPose().transformPositionInverse(source.getPosition());
+            BlockPos best = nearestTrackBlock(level, local, 8);
+            if (best != null) {
+                return new TrackSearch(best, frame.logicalPose().transformNormalInverse(look));
+            }
+        }
+
+        BlockPos best = nearestTrackBlock(level, source.getPosition(), 8);
+        return best != null ? new TrackSearch(best, look) : null;
+    }
+
+    private static boolean isTrack(ServerLevel level, BlockPos pos) {
+        return level.getBlockState(pos).getBlock() instanceof ITrackBlock;
+    }
+
+    private static @Nullable ServerSubLevel subLevelAt(ServerLevel level, BlockPos pos) {
+        var subLevel = Sable.HELPER.getContaining(level,
+                new org.joml.Vector3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5));
+        return subLevel instanceof ServerSubLevel serverSubLevel && !serverSubLevel.isRemoved()
+                ? serverSubLevel : null;
+    }
+
+    /**
+     * @return the sub-level whose plot holds the rails around the player, or {@code null}
+     */
+    private static @Nullable ServerSubLevel playerRailFrame(Entity entity, ServerLevel level) {
+        if (entity == null) return null;
+        SubLevel tracking = Sable.HELPER.getTrackingSubLevel(entity);
+        if (tracking == null) return null;
+
+        Vec3 origin = entity.position();
+        if (tracking instanceof ServerSubLevel serverTracking && !serverTracking.isRemoved()) {
+            Vec3 local = serverTracking.logicalPose().transformPositionInverse(origin);
+            if (nearestTrackBlock(level, local, 8) != null) {
+                return serverTracking;
+            }
+        }
+
+        // The player may be riding a carriage body; the rails are on the platform below it.
+        var container = dev.ryanhcode.sable.api.sublevel.SubLevelContainer.getContainer(level);
+        if (container == null) return null;
+        for (SubLevel subLevel : container.getAllSubLevels()) {
+            if (!(subLevel instanceof ServerSubLevel frame) || frame.isRemoved()) continue;
+            var bounds = frame.getPlot().getBoundingBox();
+            if (bounds == null) continue;
+            Vec3 local = frame.logicalPose().transformPositionInverse(origin);
+            if (local.x < bounds.minX() - 1.0 || local.x > bounds.maxX() + 2.0
+                    || local.y < bounds.minY() - 1.0 || local.y > bounds.maxY() + 2.0
+                    || local.z < bounds.minZ() - 1.0 || local.z > bounds.maxZ() + 2.0) {
+                continue;
+            }
+            if (nearestTrackBlock(level, local, 8) != null) {
+                return frame;
+            }
+        }
+        return null;
+    }
+
+    private static @Nullable BlockPos nearestTrackBlock(ServerLevel level, Vec3 point, int radius) {
+        BlockPos center = BlockPos.containing(point);
         BlockPos best = null;
         double bestDistance = Double.MAX_VALUE;
 
-        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-8, -4, -8), center.offset(8, 4, 8))) {
-            if (!(level.getBlockState(pos).getBlock() instanceof ITrackBlock)) continue;
+        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-radius, -4, -radius),
+                center.offset(radius, 4, radius))) {
+            if (!isTrack(level, pos)) continue;
 
-            double distance = pos.distToCenterSqr(origin);
+            double distance = pos.distToCenterSqr(point);
             if (distance >= bestDistance) continue;
             bestDistance = distance;
             best = pos.immutable();
