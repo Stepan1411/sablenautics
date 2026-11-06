@@ -1,8 +1,16 @@
 {
-  "variants": {
-    "facing=north": { "model": "sablenautics:block/sticker", "y": 180 },
-    "facing=south": { "model": "sablenautics:block/sticker" },
-    "facing=west": { "model": "sablenautics:block/sticker", "y": 90 },
-    "facing=east": { "model": "sablenautics:block/sticker", "y": 270 }
-  }
+  "multipart": [
+    { "apply": { "model": "sablenautics:block/sticker", "y": 0 }, "when": { "facing": "north" } },
+    { "apply": { "model": "sablenautics:block/sticker", "y": 180 }, "when": { "facing": "south" } },
+    { "apply": { "model": "sablenautics:block/sticker", "y": 270 }, "when": { "facing": "west" } },
+    { "apply": { "model": "sablenautics:block/sticker", "y": 90 }, "when": { "facing": "east" } },
+    { "apply": { "model": "sablenautics:block/sticker", "x": 90, "y": 0 }, "when": { "facing": "up", "rotation": "north" } },
+    { "apply": { "model": "sablenautics:block/sticker", "x": 90, "y": 90 }, "when": { "facing": "up", "rotation": "east" } },
+    { "apply": { "model": "sablenautics:block/sticker", "x": 90, "y": 180 }, "when": { "facing": "up", "rotation": "south" } },
+    { "apply": { "model": "sablenautics:block/sticker", "x": 90, "y": 270 }, "when": { "facing": "up", "rotation": "west" } },
+    { "apply": { "model": "sablenautics:block/sticker", "x": 270, "y": 0 }, "when": { "facing": "down", "rotation": "north" } },
+    { "apply": { "model": "sablenautics:block/sticker", "x": 270, "y": 90 }, "when": { "facing": "down", "rotation": "east" } },
+    { "apply": { "model": "sablenautics:block/sticker", "x": 270, "y": 180 }, "when": { "facing": "down", "rotation": "south" } },
+    { "apply": { "model": "sablenautics:block/sticker", "x": 270, "y": 270 }, "when": { "facing": "down", "rotation": "west" } }
+  ]
 }
