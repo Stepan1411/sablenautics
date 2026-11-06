@@ -241,6 +241,10 @@ public final class SableTrainController {
     private static final Map<UUID, Double> DETACHED_TRAIN_SPEED = new HashMap<>();
     /** Last game tick at which a carriage of the train hit a solid block ahead. */
     private static final Map<UUID, Long> BLOCKED_TRAINS = new HashMap<>();
+    /** Trains that may not re-attach until this game tick (set when they detach). */
+    private static final Map<UUID, Long> ATTACH_COOLDOWN_UNTIL = new HashMap<>();
+    /** Ticks during which a freshly detached train cannot re-attach. */
+    private static final int ATTACH_COOLDOWN_TICKS = 10;
     /** Game tick until which a freshly docked train is held still. */
     private static final Map<UUID, Long> DOCKED_UNTIL = new HashMap<>();
     /** Sub-levels whose plot no longer contains any blocks, refreshed periodically. */
@@ -723,6 +727,7 @@ public final class SableTrainController {
      */
     private static int detachWholeTrain(Train train, double error) {
         int detached = 0;
+        long now = -1L;
         for (SubLevelData data : SUBLEVELS.values()) {
             if (!data.trainId().equals(train.id)) continue;
             if (data.subLevel().isRemoved()) continue;
@@ -734,6 +739,9 @@ public final class SableTrainController {
             }
 
             ServerLevel bodyLevel = data.subLevel().getLevel();
+            if (bodyLevel != null && now < 0) {
+                now = bodyLevel.getGameTime();
+            }
             SubLevelPhysicsSystem physicsSystem = bodyLevel != null ? SubLevelPhysicsSystem.get(bodyLevel) : null;
             if (physicsSystem != null && physicsSystem.getPipeline() != null) {
                 physicsSystem.getPipeline().wakeUp(data.subLevel());
@@ -751,6 +759,10 @@ public final class SableTrainController {
             data.attachStartTick = -1L;
             suspendCarriagePoints(train, data);
             writeDetachedFlag(data);
+        }
+
+        if (detached > 0 && now >= 0) {
+            ATTACH_COOLDOWN_UNTIL.put(train.id, now + ATTACH_COOLDOWN_TICKS);
         }
 
         // Remember the graph before freezeTrain() nulls it. A train that merely fell off its
@@ -1074,6 +1086,9 @@ public final class SableTrainController {
      */
     private static boolean relocateToTrackPoint(Train train, ServerLevel level, TrackPoint candidate,
                                                 Vec3 direction, boolean teleportBodies) {
+        if (isAttachCooldown(train.id, level.getGameTime())) {
+            return false;
+        }
         TrackGraph graph = candidate.graph();
         TrackNode node1 = graph.locateNode(candidate.edge().getFirst());
         TrackNode node2 = graph.locateNode(candidate.edge().getSecond());
@@ -1207,6 +1222,7 @@ public final class SableTrainController {
 
     private static boolean tryAttachToSavedTrack(Train train, ServerLevel level, SubLevelData data) {
         long now = level.getGameTime();
+        if (isAttachCooldown(train.id, now)) return false;
         if (now < data.nextAttachAttemptTick) return false;
 
         TrackGraph graph = DETACHED_GRAPHS.get(train.id);
@@ -1258,6 +1274,7 @@ public final class SableTrainController {
     private static boolean tryAttachToNearbyTrack(ServerSubLevel body, ServerLevel level, Train train,
                                                   SubLevelData data) {
         if (!data.detached) return false;
+        if (isAttachCooldown(train.id, level.getGameTime())) return false;
         if (!data.autoAttachTrigger) return false;
         if (!allCarriagesDetached(train)) return false;
 
@@ -1391,6 +1408,9 @@ public final class SableTrainController {
      * for a physics approach made re-railing feel unresponsive.
      */
     private static boolean beginAttachment(Train train, ServerLevel level) {
+        if (isAttachCooldown(train.id, level.getGameTime())) {
+            return false;
+        }
         double preservedSpeed = currentForwardSpeed(train);
         double maxError = 0.0;
         double maxAngle = 0.0;
@@ -2173,6 +2193,11 @@ public final class SableTrainController {
         return since != null && gameTime - since <= WALL_BLOCKED_MEMORY_TICKS;
     }
 
+    private static boolean isAttachCooldown(UUID trainId, long gameTime) {
+        Long until = ATTACH_COOLDOWN_UNTIL.get(trainId);
+        return until != null && gameTime < until;
+    }
+
 
     /**
      * The physical bodies on the rails are independent rigid bodies. Create, however, only
@@ -2697,6 +2722,12 @@ public final class SableTrainController {
         if (train == null) return 0;
         ensureMappings(train);
         linkNeighbours(train);
+
+        ServerSubLevel firstBody = subLevelFor(train, 0);
+        if (firstBody != null && firstBody.getLevel() != null
+                && isAttachCooldown(train.id, firstBody.getLevel().getGameTime())) {
+            return 0;
+        }
 
         double preservedSpeed = currentForwardSpeed(train);
 
@@ -3495,6 +3526,7 @@ public final class SableTrainController {
         DETACHED_TRAIN_SPEED.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         BLOCKED_TRAINS.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         DOCKED_UNTIL.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
+        ATTACH_COOLDOWN_UNTIL.keySet().removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
         GONE_TRAINS.removeIf(id -> !Create.RAILWAYS.trains.containsKey(id));
     }
 
@@ -3565,6 +3597,7 @@ public final class SableTrainController {
         SableTrainControlManager.stopForTrain(server, trainId);
         Create.RAILWAYS.removeTrain(trainId);
         LAST_TRAIN_SPEED.remove(trainId);
+        ATTACH_COOLDOWN_UNTIL.remove(trainId);
         DETACHED_GRAPHS.remove(trainId);
         DETACHED_TRAIN_SPEED.remove(trainId);
         GONE_TRAINS.remove(trainId);
@@ -3666,6 +3699,10 @@ public final class SableTrainController {
         }
         // A detached carriage keeps the pose it was saved with; an attached one is aligned once.
         data.initialized = data.detached;
+        if (data.detached && subLevel.getLevel() != null) {
+            ATTACH_COOLDOWN_UNTIL.put(trainId,
+                    subLevel.getLevel().getGameTime() + ATTACH_COOLDOWN_TICKS);
+        }
 
         SUBLEVELS.put(subLevel.getUniqueId(), data);
         GONE_TRAINS.remove(trainId);
@@ -3797,6 +3834,7 @@ public final class SableTrainController {
         DETACHED_TRAIN_SPEED.clear();
         BLOCKED_TRAINS.clear();
         DOCKED_UNTIL.clear();
+        ATTACH_COOLDOWN_UNTIL.clear();
         EMPTY_BODIES.clear();
         GONE_TRAINS.clear();
     }
