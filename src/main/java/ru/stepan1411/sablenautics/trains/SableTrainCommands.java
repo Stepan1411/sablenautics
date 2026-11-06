@@ -134,7 +134,10 @@ public final class SableTrainCommands {
 
                 double distance = subLevel.logicalPose().position()
                         .distanceSquared(origin.x, origin.y, origin.z);
-                if (playerFrame != null && playerFrame != subLevel) {
+                if (playerFrame == subLevel) {
+                    // The player is standing inside this very carriage body.
+                    distance = 0.0;
+                } else if (playerFrame != null) {
                     // Inverse-project the body into the plot the player is standing in.
                     Vec3 plot = playerFrame.logicalPose().transformPositionInverse(
                             new Vec3(subLevel.logicalPose().position().x(),
