@@ -132,6 +132,12 @@ public final class SableTrainController {
     private static final String FLY_OFF_ANCHOR_X_KEY = "sablenautics_fly_off_anchor_x";
     private static final String FLY_OFF_ANCHOR_Y_KEY = "sablenautics_fly_off_anchor_y";
     private static final String FLY_OFF_ANCHOR_Z_KEY = "sablenautics_fly_off_anchor_z";
+    /**
+     * UUID of the sub-level whose plot contains the rails this carriage is riding on.
+     * Rails can be placed inside a Sable physics body (a moving platform); the train then
+     * has to follow that body's pose and velocity in addition to the track graph.
+     */
+    private static final String RAIL_FRAME_KEY = "sablenautics_rail_frame";
     public static final String SABLE_TRAIN_KEY = "SablenauticsSableTrain";
     private static final String BOGIES_KEY = "sablenautics_bogies";
     private static final String RUN_OVER_KEY = "sablenautics_last_run_over";
@@ -194,9 +200,9 @@ public final class SableTrainController {
     private static final double TURN_HOLD_MULTIPLIER = 2.2;
     /** Curves allow a little more lateral offset before the train is considered torn off. */
     private static final double TURN_DETACH_MULTIPLIER = 1.5;
-    private static final double MAX_TARGET_VELOCITY = 40.0;
+    private static final double MAX_TARGET_VELOCITY = 80.0;
     private static final double MAX_TARGET_ANGULAR_VELOCITY = 20.0;
-    private static final double MAX_BODY_SPEED = 40.0;
+    private static final double MAX_BODY_SPEED = 80.0;
     private static final double MAX_TARGET_STEP = 4.0;
 
     /**
@@ -322,6 +328,12 @@ public final class SableTrainController {
         private @Nullable GenericConstraintHandle railJoint;
         /** Free joint to the next carriage, used only to disable body-body contacts. */
         private @Nullable GenericConstraintHandle nextContactJoint;
+        /**
+         * Sub-level whose plot holds the rails this carriage runs on, or {@code null} when
+         * the rails are in the open world. A moving Sable platform therefore carries the
+         * train with it, both in position and in rotation.
+         */
+        private @Nullable ServerSubLevel railFrame;
 
         private SubLevelData(ServerSubLevel subLevel, UUID trainId, int carriageIndex,
                              float initialYaw, Direction assemblyDirection,
@@ -372,6 +384,14 @@ public final class SableTrainController {
         }
 
         /**
+         * @return the Sable sub-level that carries the rails of this carriage, or {@code null}
+         *         for rails placed directly in the world
+         */
+        public @Nullable ServerSubLevel railFrame() {
+            return railFrame;
+        }
+
+        /**
          * @param local seat position relative to the plot center
          * @return which controls this seat can drive, or {@code null} if it is not a driver seat
          */
@@ -407,6 +427,19 @@ public final class SableTrainController {
         SubLevelData data = new SubLevelData(subLevel, train.id, carriageIndex, initialYaw,
                 assemblyDirection, superglue == null ? List.of() : List.copyOf(superglue), safeBogies);
         applyConductors(data, subLevel);
+
+        // A train can be assembled inside another Sable body (a platform or another train
+        // carrying rails). Remember that body: the rails move with it, so the carriage has to
+        // follow its pose and velocity instead of staying in the open world frame.
+        if (contraption != null && subLevel.getLevel() != null) {
+            ServerSubLevel railFrame = containingSubLevel(subLevel.getLevel(),
+                    Vec3.atCenterOf(contraption.anchor));
+            if (railFrame != subLevel && railFrame != null
+                    && !frameBelongsToTrain(railFrame, train.id)) {
+                data.railFrame = railFrame;
+            }
+        }
+
         SUBLEVELS.put(subLevel.getUniqueId(), data);
         GONE_TRAINS.remove(train.id);
         markSableTrain(train);
@@ -422,6 +455,7 @@ public final class SableTrainController {
         bodyData.putBoolean(DETACHED_KEY, false);
         bodyData.putBoolean(FLEW_OFF_KEY, false);
         bodyData.put(BOGIES_KEY, writeBogies(safeBogies));
+        writeRailFrame(data, bodyData);
         subLevel.setUserDataTag(bodyData);
 
         LOGGER.info("Sablenautics: Registered sublevel {} for train {} carriage {} (bogies {}, yaw {}, direction {}, glue {})",
@@ -483,6 +517,14 @@ public final class SableTrainController {
         DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(level.dimension());
         if (dce == null) {
             dce = carriage.getDimensional(level.dimension());
+        }
+
+        // Decide early which sub-level (if any) owns the rails, so every helper below works
+        // in the right coordinate space.
+        if (!data.detached) {
+            resolveRailFrame(data, serverLevel, dce != null ? dce.positionAnchor : null);
+        } else if (data.attachTargetPosition == null) {
+            resolveRailFrame(data, serverLevel, null);
         }
 
         // A detached train is completely free of the track. Suspend its travelling points so
@@ -573,6 +615,11 @@ public final class SableTrainController {
         Vec3 anchor = dce.positionAnchor;
         Quaterniond targetOrientation = computeTargetOrientation(dce, pose, data.initialYaw());
         Vector3d targetPosition = computeBodyTargetPosition(serverSubLevel, data, anchor, targetOrientation);
+        // Rails may live inside another Sable sub-level (a moving/rotating platform). In that
+        // case the whole rail frame moves the train: transform the graph-space target into
+        // world space and add the frame's motion through the finite difference below.
+        Vector3d plotTarget = new Vector3d(targetPosition);
+        applyRailFrame(data, serverLevel, anchor, targetPosition, targetOrientation);
         if (!isFinite(targetPosition) || !isFinite(targetOrientation)) {
             LOGGER.warn("Sablenautics: carriage {} of train {} has an invalid rail target ({} / {})",
                     data.carriageIndex(), train.id, targetPosition, targetOrientation);
@@ -581,7 +628,7 @@ public final class SableTrainController {
         }
         double targetStep = data.hasTarget ? targetPosition.distance(data.lastTargetPosition) : 0.0;
 
-        updateTargetVelocity(data, targetPosition, targetOrientation, serverLevel);
+        updateTargetVelocity(data, targetPosition, targetOrientation, serverLevel, plotTarget);
 
         SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(serverLevel);
         PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
@@ -927,6 +974,21 @@ public final class SableTrainController {
     public static boolean relocateToTrackBlock(Train train, ServerLevel level, BlockPos pos, Vec3 lookDirection) {
         if (train == null || level == null || pos == null) return false;
         ensureMappings(train);
+
+        // The clicked block can be inside a Sable sub-level (rails on a moving platform).
+        // Remember which frame the train is being placed into so targets are projected
+        // correctly, and clear it when the player explicitly moves the train to world rails.
+        ServerSubLevel clickedFrame = containingSubLevel(level, Vec3.atCenterOf(pos));
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id)) continue;
+            data.railFrame = clickedFrame != null && !frameBelongsToTrain(clickedFrame, train.id)
+                    ? clickedFrame : null;
+            CompoundTag frameData = data.subLevel().getUserDataTag();
+            if (frameData != null) {
+                writeRailFrame(data, frameData);
+                data.subLevel().setUserDataTag(frameData);
+            }
+        }
 
         Vec3 direction = lookDirection == null ? Vec3.ZERO : lookDirection;
         TrackPoint exact = trackPointAtBlock(level, pos, direction);
@@ -1290,9 +1352,14 @@ public final class SableTrainController {
             if (otherBody.isRemoved()) continue;
 
             Pose3d pose = otherBody.logicalPose();
+            ServerSubLevel frame = other.railFrame;
             for (BogieInfo bogie : other.bogies()) {
                 Vector3d world = pose.transformPosition(bogie.localPlotCenter(), new Vector3d());
-                bogieProbes.add(new BogieProbe(other, new Vec3(world.x, world.y, world.z)));
+                Vec3 point = new Vec3(world.x, world.y, world.z);
+                if (frame != null && !frame.isRemoved()) {
+                    point = worldToTrackSpace(frame, point);
+                }
+                bogieProbes.add(new BogieProbe(other, point));
             }
         }
 
@@ -1319,8 +1386,12 @@ public final class SableTrainController {
             BogieInfo rearBogie = rearData.bogies().get(rearData.bogies().size() - 1);
             Vector3d rearWorld = rearData.subLevel().logicalPose()
                     .transformPosition(rearBogie.localPlotCenter(), new Vector3d());
-            Vec3 rearPoint = new Vec3(rearWorld.x, rearWorld.y, rearWorld.z)
-                    .subtract(direction.scale(rearBogie.wheelPointSpacing() * 0.5));
+            Vec3 rearPoint = new Vec3(rearWorld.x, rearWorld.y, rearWorld.z);
+            ServerSubLevel rearFrame = rearData.railFrame;
+            if (rearFrame != null && !rearFrame.isRemoved()) {
+                rearPoint = worldToTrackSpace(rearFrame, rearPoint);
+            }
+            rearPoint = rearPoint.subtract(direction.scale(rearBogie.wheelPointSpacing() * 0.5));
             if (hasTrackNearby(level, rearPoint, TRACK_SEARCH_RADIUS)) {
                 TrackPoint rearCandidate = findNearestTrackPoint(level, rearPoint, TRACK_SEARCH_RADIUS);
                 if (rearCandidate != null) {
@@ -1433,6 +1504,7 @@ public final class SableTrainController {
             Pose3d pose = data.subLevel().logicalPose();
             Quaterniond orientation = computeTargetOrientation(dce, pose, data.initialYaw());
             Vector3d target = computeBodyTargetPosition(data.subLevel(), data, dce.positionAnchor, orientation);
+            applyRailFrame(data, level, dce.positionAnchor, target, orientation);
             targets.add(target);
             orientations.add(orientation);
 
@@ -1594,6 +1666,19 @@ public final class SableTrainController {
     }
 
     /**
+     * @return velocity of the rail frame at a world point (blocks per second), or {@code null}
+     *         when the rails are in the open world
+     */
+    private static @Nullable Vector3d frameVelocityAt(SubLevelData data, Vector3d worldPoint) {
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null || frame.isRemoved() || worldPoint == null) return null;
+        ServerLevel level = frame.getLevel();
+        if (level == null) return null;
+        Vector3d plotPoint = frame.logicalPose().transformPositionInverse(worldPoint);
+        return Sable.HELPER.getVelocity(level, frame, plotPoint, new Vector3d());
+    }
+
+    /**
      * @return the current forward speed of the physical bodies in blocks per tick
      */
     private static double currentForwardSpeed(Train train) {
@@ -1607,16 +1692,21 @@ public final class SableTrainController {
             if (forward.lengthSqr() < 1.0e-8) continue;
 
             Vector3dc velocity = data.subLevel().latestLinearVelocity;
-            sum += (forward.x * velocity.x()
-                    + forward.y * velocity.y()
-                    + forward.z * velocity.z()) / 20.0;
+            Vector3d relative = new Vector3d(velocity.x(), velocity.y(), velocity.z());
+            Vector3dc bodyPosition = data.subLevel().logicalPose().position();
+            Vector3d frameVelocity = frameVelocityAt(data, new Vector3d(bodyPosition));
+            if (frameVelocity != null) {
+                relative.sub(frameVelocity);
+            }
+            sum += (forward.x * relative.x + forward.y * relative.y + forward.z * relative.z) / 20.0;
             count++;
         }
         return count > 0 ? sum / count : 0.0;
     }
 
     /**
-     * Applies the preserved forward speed to every attached body after a teleport.
+     * Applies the preserved forward speed to every attached body after a teleport. On a moving
+     * rail frame the body also inherits the frame's velocity so it does not get left behind.
      */
     private static void applyForwardVelocity(Train train, double speed) {
         for (SubLevelData data : SUBLEVELS.values()) {
@@ -1634,11 +1724,13 @@ public final class SableTrainController {
             if (forward.lengthSqr() < 1.0e-8) continue;
 
             Vector3d axis = new Vector3d(forward.x, forward.y, forward.z);
-            double desired = speed * 20.0;
-            double current = handle.getLinearVelocity(new Vector3d()).dot(axis);
-            handle.addLinearAndAngularVelocity(
-                    new Vector3d(axis).mul(desired - current),
-                    new Vector3d());
+            Vector3d desired = new Vector3d(axis).mul(speed * 20.0);
+            Vector3d frameVelocity = frameVelocityAt(data, data.targetPosition);
+            if (frameVelocity != null) {
+                desired.add(frameVelocity);
+            }
+            Vector3d current = handle.getLinearVelocity(new Vector3d());
+            handle.addLinearAndAngularVelocity(new Vector3d(desired).sub(current), new Vector3d());
             pipeline.wakeUp(body);
         }
     }
@@ -1653,7 +1745,13 @@ public final class SableTrainController {
         TravellingPoint trailing = carriage.getTrailingPoint();
         if (leading.edge != null && trailing.edge != null) {
             Vec3 forward = leading.getPosition(train.graph).subtract(trailing.getPosition(train.graph));
-            if (forward.lengthSqr() > 1.0e-8) return forward.normalize();
+            if (forward.lengthSqr() > 1.0e-8) {
+                ServerSubLevel frame = data.railFrame;
+                if (frame != null && !frame.isRemoved()) {
+                    forward = frame.logicalPose().transformNormal(forward);
+                }
+                return forward.normalize();
+            }
         }
         return Vec3.ZERO;
     }
@@ -1848,7 +1946,7 @@ public final class SableTrainController {
             Vector3d first = pose.transformPosition(bogies.get(0).localPlotCenter(), new Vector3d());
             Vector3d second = pose.transformPosition(bogies.get(1).localPlotCenter(), new Vector3d());
             Vec3 forward = new Vec3(first.x - second.x, 0.0, first.z - second.z);
-            if (forward.lengthSqr() > 1.0e-4) return forward.normalize();
+            if (forward.lengthSqr() > 1.0e-4) return toTrackSpace(data, forward.normalize());
         }
 
         // Fallback: use the body's own forward axis from the assembly direction.
@@ -1856,14 +1954,25 @@ public final class SableTrainController {
         Vector3d local = new Vector3d(assemblyDirection.getStepX(), 0.0, assemblyDirection.getStepZ());
         Vector3d rotated = pose.orientation().transform(local, new Vector3d());
         Vec3 fallback = new Vec3(rotated.x, 0.0, rotated.z);
-        if (fallback.lengthSqr() > 1.0e-4) return fallback.normalize();
+        if (fallback.lengthSqr() > 1.0e-4) return toTrackSpace(data, fallback.normalize());
 
         // Last resort: current horizontal velocity (may be near zero when landed).
         Vector3d velocity = body.latestLinearVelocity;
         Vec3 horizontal = new Vec3(velocity.x, 0.0, velocity.z);
-        if (horizontal.lengthSqr() > 1.0e-4) return horizontal.normalize();
+        if (horizontal.lengthSqr() > 1.0e-4) return toTrackSpace(data, horizontal.normalize());
 
         return new Vec3(0.0, 0.0, 1.0);
+    }
+
+    /**
+     * Converts a world-space direction into the rail graph's coordinate space. Rails inside a
+     * Sable sub-level are stored in that sub-level's local coordinates, so layout decisions
+     * have to happen in the same frame.
+     */
+    private static Vec3 toTrackSpace(SubLevelData data, Vec3 worldDirection) {
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null || frame.isRemoved()) return worldDirection;
+        return frame.logicalPose().transformNormalInverse(worldDirection);
     }
 
     /**
@@ -2021,7 +2130,8 @@ public final class SableTrainController {
     }
 
     private static void updateTargetVelocity(SubLevelData data, Vector3d targetPosition,
-                                             Quaterniond targetOrientation, ServerLevel level) {
+                                             Quaterniond targetOrientation, ServerLevel level,
+                                             Vector3d plotTarget) {
         long now = level.getGameTime();
         if (data.hasTarget) {
             double dtTicks = Math.max(1L, now - data.lastTargetTick);
@@ -2034,7 +2144,16 @@ public final class SableTrainController {
                 data.targetVelocity.set(targetPosition).sub(data.lastTargetPosition).div(dt);
                 clampLength(data.targetVelocity, MAX_TARGET_VELOCITY);
             } else {
+                // A rail target that jumps is normally a relocation. On a moving rail frame it
+                // can also mean the platform simply outran the per-tick step limit, so use the
+                // frame's own point velocity as a feed-forward instead of dropping it.
                 data.targetVelocity.zero();
+                ServerSubLevel frame = data.railFrame;
+                if (frame != null && !frame.isRemoved() && plotTarget != null) {
+                    Vector3d frameVelocity = Sable.HELPER.getVelocity(level, frame, plotTarget, new Vector3d());
+                    data.targetVelocity.set(frameVelocity);
+                    clampLength(data.targetVelocity, MAX_TARGET_VELOCITY);
+                }
             }
 
             Quaterniond delta = new Quaterniond(targetOrientation)
@@ -2145,10 +2264,20 @@ public final class SableTrainController {
         double distance = Math.min(halfLength + WALL_PROBE_MARGIN, 12.0);
         double height = bounds.maxY - bounds.minY;
 
+        // When the rails are inside a Sable sub-level, the actual obstacles are the blocks in
+        // that sub-level's plot. Probe the plot coordinates instead of the open world.
+        ServerSubLevel frame = data.railFrame;
+        Vec3 probeCenter = center;
+        Vec3 probeDirection = direction;
+        if (frame != null && !frame.isRemoved()) {
+            probeCenter = worldToTrackSpace(frame, center);
+            probeDirection = frame.logicalPose().transformNormalInverse(direction);
+        }
+
         for (double verticalOffset : new double[]{0.0, height * 0.3, -height * 0.45}) {
-            Vec3 start = center.add(0.0, verticalOffset, 0.0);
-            Vec3 end = start.add(direction.scale(distance));
-            if (hasBlockingWorldBlock(level, start, end, direction)) {
+            Vec3 start = probeCenter.add(0.0, verticalOffset, 0.0);
+            Vec3 end = start.add(probeDirection.scale(distance));
+            if (hasBlockingWorldBlock(level, start, end, probeDirection)) {
                 BLOCKED_TRAINS.put(train.id, level.getGameTime());
                 return;
             }
@@ -2362,8 +2491,13 @@ public final class SableTrainController {
                 .add(pose.position());
 
         Vector3d axis = new Vector3d(forward.x, forward.y, forward.z).normalize();
+        Vec3 plotAnchor = dce.positionAnchor;
+        ServerSubLevel frame = data.railFrame;
+        Vec3 anchorWorld = frame != null && !frame.isRemoved()
+                ? frame.logicalPose().transformPosition(plotAnchor)
+                : plotAnchor;
         double result = new Vector3d(bodyAnchor)
-                .sub(new Vector3d(dce.positionAnchor.x, dce.positionAnchor.y, dce.positionAnchor.z))
+                .sub(new Vector3d(anchorWorld.x, anchorWorld.y, anchorWorld.z))
                 .dot(axis);
         return Double.isFinite(result) ? result : 0.0;
     }
@@ -2400,6 +2534,159 @@ public final class SableTrainController {
                 .rotateY(Math.toRadians(-yaw))
                 .rotateZ(Math.toRadians(pitch))
                 .rotateY(Math.toRadians(initialYaw));
+    }
+
+    /**
+     * @return the Sable sub-level whose plot contains {@code point} (graph coordinates),
+     *         or {@code null} when the point is in the open world
+     */
+    private static @Nullable ServerSubLevel containingSubLevel(ServerLevel level, Vec3 point) {
+        if (level == null || point == null) return null;
+        SubLevel subLevel = Sable.HELPER.getContaining(level,
+                new Vector3d(point.x, point.y, point.z));
+        if (!(subLevel instanceof ServerSubLevel serverSubLevel) || serverSubLevel.isRemoved()) {
+            return null;
+        }
+        return serverSubLevel;
+    }
+
+    /**
+     * @return true if the frame sub-level is one of this train's own carriage bodies. Rails on
+     *         a train's own body cannot carry that same train without a feedback loop.
+     */
+    private static boolean frameBelongsToTrain(ServerSubLevel frame, UUID trainId) {
+        CompoundTag userData = frame.getUserDataTag();
+        return userData != null && userData.hasUUID(TRAIN_KEY) && trainId.equals(userData.getUUID(TRAIN_KEY));
+    }
+
+    /**
+     * Finds (or keeps) the sub-level that carries this carriage's rails. While the carriage is
+     * attached the anchor is a valid graph position, so the containing plot is authoritative.
+     * A detached carriage keeps the last known frame so it can be pulled back onto rails that
+     * moved with their platform.
+     */
+    private static @Nullable ServerSubLevel resolveRailFrame(SubLevelData data, ServerLevel level,
+                                                             @Nullable Vec3 plotAnchor) {
+        if (plotAnchor != null) {
+            ServerSubLevel containing = containingSubLevel(level, plotAnchor);
+            ServerSubLevel previous = data.railFrame;
+            if (containing != null && containing != data.subLevel()
+                    && !frameBelongsToTrain(containing, data.trainId)) {
+                if (previous != containing) {
+                    LOGGER.info("Sablenautics: carriage {} of train {} is riding on rail frame {}",
+                            data.carriageIndex(), data.trainId, containing.getUniqueId());
+                }
+                data.railFrame = containing;
+                return containing;
+            }
+            if (previous != null) {
+                LOGGER.info("Sablenautics: carriage {} of train {} left rail frame {}",
+                        data.carriageIndex(), data.trainId, previous.getUniqueId());
+            }
+            data.railFrame = null;
+            return null;
+        }
+
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null) {
+            // No persisted frame (old save, or the frame was re-created). Detect it from the
+            // body's world position: a rail frame is the sub-level whose plot contains the
+            // body and has a track near the same point.
+            if (level != null) {
+                Vector3dc bodyPosition = data.subLevel().logicalPose().position();
+                frame = findRailFrameForWorldPoint(level,
+                        new Vec3(bodyPosition.x(), bodyPosition.y(), bodyPosition.z()),
+                        data.trainId, data.subLevel());
+                if (frame != null) {
+                    data.railFrame = frame;
+                    return frame;
+                }
+            }
+            return null;
+        }
+        if (frame.isRemoved() || frame.getLevel() != level) {
+            data.railFrame = null;
+            return null;
+        }
+        return frame;
+    }
+
+    /**
+     * Finds a sub-level whose plot contains {@code worldPoint} (in its local space) and has
+     * rails nearby. This is how a train recognises a moving platform even without persisted
+     * frame data.
+     */
+    private static @Nullable ServerSubLevel findRailFrameForWorldPoint(ServerLevel level, Vec3 worldPoint,
+                                                                      UUID trainId, ServerSubLevel ownBody) {
+        SubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null) return null;
+
+        for (SubLevel subLevel : container.getAllSubLevels()) {
+            if (!(subLevel instanceof ServerSubLevel frame) || frame.isRemoved()) continue;
+            if (frame == ownBody || frameBelongsToTrain(frame, trainId)) continue;
+
+            BoundingBox3ic bounds = frame.getPlot().getBoundingBox();
+            if (bounds == null) continue;
+
+            Vec3 local = frame.logicalPose().transformPositionInverse(worldPoint);
+            if (!plotContains(bounds, local)) continue;
+            if (!hasTrackNearby(level, local, TRACK_SEARCH_RADIUS)) continue;
+            return frame;
+        }
+        return null;
+    }
+
+    private static boolean plotContains(BoundingBox3ic bounds, Vec3 point) {
+        return point.x >= bounds.minX() - 1.0 && point.x <= bounds.maxX() + 2.0
+                && point.y >= bounds.minY() - 1.0 && point.y <= bounds.maxY() + 2.0
+                && point.z >= bounds.minZ() - 1.0 && point.z <= bounds.maxZ() + 2.0;
+    }
+
+    /**
+     * Moves a rail target from the track graph's coordinate space into world space when the
+     * rails are placed inside a Sable sub-level. The rail frame supplies position, rotation
+     * and (through the target finite difference) velocity.
+     */
+    private static void applyRailFrame(SubLevelData data, ServerLevel level, @Nullable Vec3 plotAnchor,
+                                       Vector3d targetPosition, Quaterniond targetOrientation) {
+        ServerSubLevel frame = resolveRailFrame(data, level, plotAnchor);
+        if (frame == null) return;
+
+        Pose3d framePose = frame.logicalPose();
+        targetPosition.set(framePose.transformPosition(targetPosition, new Vector3d()));
+        targetOrientation.set(new Quaterniond(framePose.orientation()).mul(targetOrientation));
+    }
+
+    /**
+     * @return yaw (degrees) of the rail frame in world space, used by the controls HUD
+     */
+    private static float frameYaw(SubLevelData data) {
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null || frame.isRemoved()) return 0.0f;
+        Vector3d forward = frame.logicalPose().orientation()
+                .transform(new Vector3d(1.0, 0.0, 0.0), new Vector3d());
+        if (forward.x * forward.x + forward.z * forward.z < 1.0e-6) return 0.0f;
+        return (float) (Math.atan2(forward.z, forward.x) * 180.0 / Math.PI);
+    }
+
+    /**
+     * @return the Sable sub-level carrying the rails of {@code body}, or {@code null}
+     */
+    public static @Nullable ServerSubLevel railFrameFor(SubLevel body) {
+        SubLevelData data = SUBLEVELS.get(body.getUniqueId());
+        if (data == null) return null;
+        ServerSubLevel frame = data.railFrame;
+        return frame != null && !frame.isRemoved() ? frame : null;
+    }
+
+    /** World point -> rail-graph (plot) point. */
+    private static Vec3 worldToTrackSpace(ServerSubLevel frame, Vec3 world) {
+        return frame.logicalPose().transformPositionInverse(world);
+    }
+
+    /** Rail-graph (plot) point -> world point. */
+    public static Vec3 trackToWorldSpace(ServerSubLevel frame, Vec3 track) {
+        return frame.logicalPose().transformPosition(track);
     }
 
     /**
@@ -2567,6 +2854,7 @@ public final class SableTrainController {
                 // independently from the (possibly lagging) carriage body.
                 Quaterniond targetOrientation = computeTargetOrientation(dce, bodyPose, data.initialYaw());
                 Vector3d targetPosition = computeTargetPosition(body, dce.positionAnchor, targetOrientation);
+                applyRailFrame(data, level, dce.positionAnchor, targetPosition, targetOrientation);
                 Vector3d localOffset = new Vector3d(info.localPlotCenter()).sub(centerOfMass);
                 Vector3d world = new Vector3d(targetPosition)
                         .add(targetOrientation.transform(localOffset, new Vector3d()));
@@ -2785,6 +3073,7 @@ public final class SableTrainController {
 
             Quaterniond orientation = computeTargetOrientation(dce, body.logicalPose(), data.initialYaw());
             Vector3d targetPosition = computeBodyTargetPosition(body, data, dce.positionAnchor, orientation);
+            applyRailFrame(data, level, dce.positionAnchor, targetPosition, orientation);
             if (!isFinite(targetPosition) || !isFinite(orientation)) {
                 LOGGER.warn("Sablenautics: refusing invalid rail target for train {} carriage {}",
                         train.id, index);
@@ -3327,7 +3616,9 @@ public final class SableTrainController {
 
         if (data != null && !data.detached()) {
             Alignment alignment = alignment(level, carriage);
-            if (alignment != null) return alignment.yaw();
+            if (alignment != null) {
+                return alignment.yaw() + frameYaw(data);
+            }
         }
 
         if (data != null) {
@@ -3697,6 +3988,14 @@ public final class SableTrainController {
                     userData.getDouble(FLY_OFF_ANCHOR_Y_KEY),
                     userData.getDouble(FLY_OFF_ANCHOR_Z_KEY));
         }
+        if (userData.contains(RAIL_FRAME_KEY) && subLevel.getLevel() != null) {
+            SubLevelContainer container = SubLevelContainer.getContainer(subLevel.getLevel());
+            if (container != null
+                    && container.getSubLevel(userData.getUUID(RAIL_FRAME_KEY)) instanceof ServerSubLevel frame
+                    && !frame.isRemoved() && frame != subLevel) {
+                data.railFrame = frame;
+            }
+        }
         // A detached carriage keeps the pose it was saved with; an attached one is aligned once.
         data.initialized = data.detached;
         if (data.detached && subLevel.getLevel() != null) {
@@ -3713,12 +4012,22 @@ public final class SableTrainController {
         return data;
     }
 
+    private static void writeRailFrame(SubLevelData data, CompoundTag tag) {
+        ServerSubLevel frame = data.railFrame;
+        if (frame != null && !frame.isRemoved()) {
+            tag.putUUID(RAIL_FRAME_KEY, frame.getUniqueId());
+        } else {
+            tag.remove(RAIL_FRAME_KEY);
+        }
+    }
+
     private static void writeDetachedFlag(SubLevelData data) {
         CompoundTag bodyData = data.subLevel().getUserDataTag();
         if (bodyData == null) bodyData = new CompoundTag();
         bodyData.putBoolean(DETACHED_KEY, data.detached);
         bodyData.putBoolean(FLEW_OFF_KEY, data.flewOff);
         bodyData.putBoolean(AUTO_ATTACH_KEY, data.autoAttachTrigger);
+        writeRailFrame(data, bodyData);
 
         Vec3 anchor = data.flyOffAnchor;
         if (anchor != null) {
