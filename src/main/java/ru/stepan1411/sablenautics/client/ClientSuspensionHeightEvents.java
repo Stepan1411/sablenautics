@@ -94,11 +94,11 @@ public final class ClientSuspensionHeightEvents {
         if (minecraft.options.keyUse.isDown()) {
             holdTicks++;
             if (holdTicks > OPEN_AFTER_TICKS) {
-                openPending(true);
+                openPending();
             }
         } else {
-            // A quick click also opens the screen; the player confirms with a second click.
-            openPending(false);
+            // Releasing before the hold threshold cancels instead of opening the screen.
+            clearPending();
         }
     }
 
@@ -140,12 +140,12 @@ public final class ClientSuspensionHeightEvents {
         Outliner.getInstance().showOutline(VALUE_BOX_KEY, box);
     }
 
-    private static void openPending(boolean fromHold) {
+    private static void openPending() {
         BlockPos pos = pendingPos;
         float height = pendingHeight;
         clearPending();
         if (pos != null) {
-            ClientSuspensionHeightScreen.open(pos, height, fromHold);
+            ClientSuspensionHeightScreen.open(pos, height);
         }
     }
 
