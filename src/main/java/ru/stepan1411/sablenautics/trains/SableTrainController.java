@@ -522,6 +522,15 @@ public final class SableTrainController {
         // Decide early which sub-level (if any) owns the rails, so every helper below works
         // in the right coordinate space.
         if (!data.detached) {
+            ServerSubLevel frame = data.railFrame;
+            if (frame != null && frame.isRemoved()) {
+                // The platform carrying the rails was dismantled. Do not fall back to the
+                // plot coordinates as if they were world coordinates: release the train.
+                data.railFrame = null;
+                detachWholeTrain(train, -1.0);
+                syncBogieBlocks(serverSubLevel, data);
+                return;
+            }
             resolveRailFrame(data, serverLevel, dce != null ? dce.positionAnchor : null);
         } else if (data.attachTargetPosition == null) {
             resolveRailFrame(data, serverLevel, null);
