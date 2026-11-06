@@ -156,7 +156,15 @@ public final class SableTrainController {
      * snap the train onto the track anyway. This is the "crashed train lying across the
      * rails" case; without it a scattered/rotated train can never be re-railed by itself.
      */
-    private static final double AUTO_ATTACH_FORCE_DISTANCE = 8.0;
+    private static final double AUTO_ATTACH_FORCE_DISTANCE = 12.0;
+    /** ...and within this angle, so a body lying across the rails can be pulled back too. */
+    private static final double AUTO_ATTACH_FORCE_ANGLE = Math.toRadians(120.0);
+    /**
+     * A detached body slower than this (blocks/second, relative to its rail frame) may be
+     * captured and smoothly pulled back onto nearby rails. Faster bodies are only attached
+     * when they are already directly on the target.
+     */
+    private static final double APPROACH_CAPTURE_SPEED = 4.0;
     /** Bodies this close/aligned can be attached without any approach animation. */
     private static final double DIRECT_ATTACH_DISTANCE = 0.35;
     private static final double DIRECT_ATTACH_ANGLE = Math.toRadians(8.0);
@@ -301,6 +309,9 @@ public final class SableTrainController {
         /** Smooth-attach target for this carriage, active while it is still detached. */
         private @Nullable Vector3d attachTargetPosition;
         private @Nullable Quaterniond attachTargetOrientation;
+        /** Same target in rail-frame space, so a moving platform keeps the approach valid. */
+        private @Nullable Vector3d attachTargetPlotPosition;
+        private @Nullable Quaterniond attachTargetPlotOrientation;
         private long attachStartTick = -1L;
         /** World position of the track end the train flew off, excluded from auto-attach. */
         private @Nullable Vec3 flyOffAnchor;
@@ -540,6 +551,7 @@ public final class SableTrainController {
         // Create's collision system cannot make other trains crash into an invisible body,
         // then let one carriage look for a new track for the whole train.
         if (data.detached) {
+            refreshApproachTarget(data);
             if (data.attachTargetPosition != null) {
                 long now = serverLevel.getGameTime();
                 Vector3dc velocity = serverSubLevel.latestLinearVelocity;
@@ -812,6 +824,8 @@ public final class SableTrainController {
             data.initialized = true;
             data.attachTargetPosition = null;
             data.attachTargetOrientation = null;
+            data.attachTargetPlotPosition = null;
+            data.attachTargetPlotOrientation = null;
             data.attachStartTick = -1L;
             suspendCarriagePoints(train, data);
             writeDetachedFlag(data);
@@ -1533,17 +1547,52 @@ public final class SableTrainController {
             }
         }
 
-        // Only attach when the wheels/body are actually next to the found rails. Otherwise a
-        // train flying past a distant track would be teleported onto it.
+        // Only attach directly when the wheels/body are actually next to the found rails.
+        // Otherwise a train flying past a distant track would be teleported onto it. A body
+        // that was detached by hand (or bumped off) is usually a few blocks away, so capture
+        // it with the physics approach instead of refusing forever.
         if (maxError > AUTO_ATTACH_DISTANCE || maxAngle > AUTO_ATTACH_ANGLE) {
-            LOGGER.debug("Sablenautics: train {} is too far from the rail target (error {}, angle {})",
+            double speed = maxRelativeBodySpeed(train);
+            boolean canApproach = maxError <= AUTO_ATTACH_FORCE_DISTANCE
+                    && maxAngle <= AUTO_ATTACH_FORCE_ANGLE
+                    && speed <= APPROACH_CAPTURE_SPEED;
+            if (!canApproach) {
+                LOGGER.debug("Sablenautics: train {} is too far from the rail target (error {}, angle {}, speed {})",
+                        train.id, String.format("%.2f", maxError),
+                        String.format("%.1f", Math.toDegrees(maxAngle)),
+                        String.format("%.2f", speed));
+                return false;
+            }
+
+            startApproach(train, level, targets, orientations);
+            LOGGER.info("Sablenautics: train {} is being pulled onto the rails (error {}, angle {})",
                     train.id, String.format("%.2f", maxError),
                     String.format("%.1f", Math.toDegrees(maxAngle)));
-            return false;
+            return true;
         }
 
         attachNow(train, level, targets, orientations, preservedSpeed);
         return true;
+    }
+
+    /**
+     * @return the highest speed (blocks/second) of any carriage relative to its rail frame
+     */
+    private static double maxRelativeBodySpeed(Train train) {
+        double maxSpeed = 0.0;
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id) || data.subLevel().isRemoved()) continue;
+
+            Vector3dc velocity = data.subLevel().latestLinearVelocity;
+            Vector3d relative = new Vector3d(velocity.x(), velocity.y(), velocity.z());
+            Vector3dc bodyPosition = data.subLevel().logicalPose().position();
+            Vector3d frameVelocity = frameVelocityAt(data, new Vector3d(bodyPosition));
+            if (frameVelocity != null) {
+                relative.sub(frameVelocity);
+            }
+            maxSpeed = Math.max(maxSpeed, relative.length());
+        }
+        return maxSpeed;
     }
 
     private static void attachNow(Train train, ServerLevel level, List<Vector3d> targets,
@@ -1577,6 +1626,16 @@ public final class SableTrainController {
 
             data.attachTargetPosition = targets.get(i);
             data.attachTargetOrientation = orientations.get(i);
+            ServerSubLevel frame = data.railFrame;
+            if (frame != null && !frame.isRemoved()) {
+                data.attachTargetPlotPosition = frame.logicalPose()
+                        .transformPositionInverse(targets.get(i));
+                data.attachTargetPlotOrientation = new Quaterniond(frame.logicalPose().orientation())
+                        .conjugate().mul(orientations.get(i));
+            } else {
+                data.attachTargetPlotPosition = null;
+                data.attachTargetPlotOrientation = null;
+            }
             data.attachStartTick = now;
             data.hasTarget = false;
             data.initialized = true;
@@ -1604,6 +1663,8 @@ public final class SableTrainController {
             if (!data.trainId().equals(train.id)) continue;
             data.attachTargetPosition = null;
             data.attachTargetOrientation = null;
+            data.attachTargetPlotPosition = null;
+            data.attachTargetPlotOrientation = null;
             data.attachStartTick = -1L;
             data.hasTarget = false;
             data.nextAttachAttemptTick = nextAttemptTick;
@@ -1636,6 +1697,8 @@ public final class SableTrainController {
 
         data.attachTargetPosition = null;
         data.attachTargetOrientation = null;
+        data.attachTargetPlotPosition = null;
+        data.attachTargetPlotOrientation = null;
         data.attachStartTick = -1L;
         data.detached = false;
         data.derailedByDetach = false;
@@ -1858,6 +1921,8 @@ public final class SableTrainController {
             data.initialized = true;
             data.attachTargetPosition = null;
             data.attachTargetOrientation = null;
+            data.attachTargetPlotPosition = null;
+            data.attachTargetPlotOrientation = null;
             data.attachStartTick = -1L;
             data.nextAttachAttemptTick = nextAttemptTick;
             writeDetachedFlag(data);
@@ -2546,6 +2611,25 @@ public final class SableTrainController {
     }
 
     /**
+     * Keeps an in-progress physics approach valid when the rails themselves move with a Sable
+     * platform. The target was captured in rail-frame space, so it is re-projected every tick.
+     */
+    private static void refreshApproachTarget(SubLevelData data) {
+        Vector3d plotTarget = data.attachTargetPlotPosition;
+        Quaterniond plotOrientation = data.attachTargetPlotOrientation;
+        if (plotTarget == null || plotOrientation == null) return;
+
+        ServerSubLevel frame = data.railFrame;
+        if (frame == null || frame.isRemoved()) return;
+
+        Pose3d framePose = frame.logicalPose();
+        if (data.attachTargetPosition == null) data.attachTargetPosition = new Vector3d();
+        if (data.attachTargetOrientation == null) data.attachTargetOrientation = new Quaterniond();
+        data.attachTargetPosition.set(framePose.transformPosition(plotTarget, new Vector3d()));
+        data.attachTargetOrientation.set(new Quaterniond(framePose.orientation()).mul(plotOrientation));
+    }
+
+    /**
      * @return the Sable sub-level whose plot contains {@code point} (graph coordinates),
      *         or {@code null} when the point is in the open world
      */
@@ -3111,6 +3195,8 @@ public final class SableTrainController {
             data.attachGraceUntil = level.getGameTime() + 10;
             data.attachTargetPosition = null;
             data.attachTargetOrientation = null;
+            data.attachTargetPlotPosition = null;
+            data.attachTargetPlotOrientation = null;
             data.attachStartTick = -1L;
             data.savedPoints.clear();
             resetTargetTracking(data, targetPosition, orientation, level);
