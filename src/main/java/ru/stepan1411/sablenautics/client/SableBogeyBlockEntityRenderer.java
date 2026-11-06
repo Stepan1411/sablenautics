@@ -206,8 +206,12 @@ public class SableBogeyBlockEntityRenderer implements BlockEntityRenderer<SableB
             return;
         }
 
-        // Match the wheel model's rolling direction to the train's direction of travel.
-        float targetRate = blockEntity.getWheelAngleDelta();
+        // X-axis bogeys are rendered with an extra 90 degree rotation, which reverses the
+        // wheel spin direction compared to Z-axis bogeys. Match Create's wheel angle sign
+        // for each orientation instead of using one global sign.
+        Direction.Axis axis = blockEntity.getBlockState().getValue(AbstractBogeyBlock.AXIS);
+        float targetRate = (axis == Direction.Axis.X ? 1.0f : -1.0f)
+                * blockEntity.getWheelAngleDelta();
         if (!spin.initialized) {
             spin.rate = targetRate;
             spin.initialized = true;
