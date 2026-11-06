@@ -4,6 +4,9 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.simibubi.create.AllItems;
 import com.simibubi.create.foundation.blockEntity.behaviour.ValueBox;
 import com.simibubi.create.foundation.blockEntity.behaviour.ValueBoxTransform;
+import dev.ryanhcode.sable.Sable;
+import dev.ryanhcode.sable.companion.ClientSubLevelAccess;
+import dev.ryanhcode.sable.companion.math.Pose3dc;
 import net.createmod.catnip.outliner.Outliner;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
@@ -20,6 +23,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+import org.joml.Vector3d;
 import ru.stepan1411.sablenautics.Sablenautics;
 import ru.stepan1411.sablenautics.content.blocks.SableBogeyBlockEntity;
 
@@ -90,11 +94,11 @@ public final class ClientSuspensionHeightEvents {
         if (minecraft.options.keyUse.isDown()) {
             holdTicks++;
             if (holdTicks > OPEN_AFTER_TICKS) {
-                openPending();
+                openPending(true);
             }
         } else {
             // A quick click also opens the screen; the player confirms with a second click.
-            openPending();
+            openPending(false);
         }
     }
 
@@ -108,8 +112,19 @@ public final class ClientSuspensionHeightEvents {
             return;
         }
 
-        Vec3 location = hit.getLocation();
-        BlockPos renderPos = BlockPos.containing(location);
+        BlockPos blockPos = hit.getBlockPos();
+        BlockPos renderPos = blockPos;
+
+        // The block entity lives in the sub-level plot; move the value box to the rendered
+        // world position of the bogey instead of leaving it at the plot coordinates.
+        ClientSubLevelAccess subLevel = Sable.HELPER.getContainingClient(bogey);
+        if (subLevel != null) {
+            Pose3dc pose = subLevel.renderPose();
+            Vector3d center = new Vector3d(blockPos.getX() + 0.5,
+                    blockPos.getY() + 0.5, blockPos.getZ() + 0.5);
+            pose.transformPosition(center, center);
+            renderPos = BlockPos.containing(center.x, center.y, center.z);
+        }
 
         AABB bb = new AABB(Vec3.ZERO, Vec3.ZERO)
                 .inflate(0.5)
@@ -125,12 +140,12 @@ public final class ClientSuspensionHeightEvents {
         Outliner.getInstance().showOutline(VALUE_BOX_KEY, box);
     }
 
-    private static void openPending() {
+    private static void openPending(boolean fromHold) {
         BlockPos pos = pendingPos;
         float height = pendingHeight;
         clearPending();
         if (pos != null) {
-            ClientSuspensionHeightScreen.open(pos, height);
+            ClientSuspensionHeightScreen.open(pos, height, fromHold);
         }
     }
 
