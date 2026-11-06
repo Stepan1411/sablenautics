@@ -11,7 +11,6 @@ import net.createmod.catnip.outliner.Outliner;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.level.LevelAccessor;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
@@ -22,7 +21,6 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
-import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import org.joml.Vector3d;
 import ru.stepan1411.sablenautics.Sablenautics;
 import ru.stepan1411.sablenautics.content.blocks.SableBogeyBlockEntity;
@@ -30,13 +28,11 @@ import ru.stepan1411.sablenautics.content.blocks.SableBogeyBlockEntity;
 import java.util.Locale;
 
 /**
- * Client-side half of the wrench suspension interaction: shows a Create-style value box
- * while hovering over a Sable bogey with a wrench and opens the value screen on use.
+ * Draws the Create-style value box over a Sable bogey while a wrench is held.
  */
 @EventBusSubscriber(modid = Sablenautics.MOD_ID, value = Dist.CLIENT)
 public final class ClientSuspensionHeightEvents {
 
-    private static final int OPEN_AFTER_TICKS = 5;
     private static final Object VALUE_BOX_KEY = new Object();
 
     private static final ValueBoxTransform VALUE_BOX_TRANSFORM = new ValueBoxTransform() {
@@ -56,54 +52,14 @@ public final class ClientSuspensionHeightEvents {
         }
     };
 
-    private static BlockPos pendingPos;
-    private static float pendingHeight;
-    private static int holdTicks;
-
     private ClientSuspensionHeightEvents() {
-    }
-
-    @SubscribeEvent
-    public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
-        if (event.getHand() != InteractionHand.MAIN_HAND) return;
-        if (!AllItems.WRENCH.isIn(event.getItemStack())) return;
-        if (!(event.getLevel().getBlockEntity(event.getPos()) instanceof SableBogeyBlockEntity bogey)) return;
-
-        pendingPos = event.getPos();
-        pendingHeight = bogey.getSuspensionOffset();
-        holdTicks = 0;
     }
 
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft minecraft = Minecraft.getInstance();
-        updateValueBox(minecraft);
-
-        if (pendingPos == null) return;
-
-        if (minecraft.screen != null) {
-            clearPending();
-            return;
-        }
-        if (minecraft.player == null
-                || !AllItems.WRENCH.isIn(minecraft.player.getMainHandItem())) {
-            clearPending();
-            return;
-        }
-
-        if (minecraft.options.keyUse.isDown()) {
-            holdTicks++;
-            if (holdTicks > OPEN_AFTER_TICKS) {
-                openPending();
-            }
-        } else {
-            // Releasing before the hold threshold cancels instead of opening the screen.
-            clearPending();
-        }
-    }
-
-    private static void updateValueBox(Minecraft minecraft) {
         HitResult target = minecraft.hitResult;
+
         if (minecraft.level == null || minecraft.player == null
                 || !(target instanceof BlockHitResult hit)
                 || !AllItems.WRENCH.isIn(minecraft.player.getMainHandItem())
@@ -138,19 +94,5 @@ public final class ClientSuspensionHeightEvents {
                 Component.literal(String.format(Locale.ROOT, "%+.2f", bogey.getSuspensionOffset())));
         box.passive(false).wideOutline().transform(VALUE_BOX_TRANSFORM);
         Outliner.getInstance().showOutline(VALUE_BOX_KEY, box);
-    }
-
-    private static void openPending() {
-        BlockPos pos = pendingPos;
-        float height = pendingHeight;
-        clearPending();
-        if (pos != null) {
-            ClientSuspensionHeightScreen.open(pos, height);
-        }
-    }
-
-    private static void clearPending() {
-        pendingPos = null;
-        holdTicks = 0;
     }
 }
