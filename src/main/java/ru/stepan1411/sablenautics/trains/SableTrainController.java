@@ -169,9 +169,9 @@ public final class SableTrainController {
     /** Ticks over which a detached bogey model slides back under its Sable bogey block. */
     private static final int BOGEY_ATTRACT_TICKS = 8;
     /** Ticks to wait after a failed relocation before probing the train again. */
-    private static final int AUTO_ATTACH_RETRY_TICKS = 10;
+    private static final int AUTO_ATTACH_RETRY_TICKS = 1;
     /** Cheap re-probe interval while the train has not found any nearby track yet. */
-    private static final int AUTO_ATTACH_SCAN_INTERVAL = 2;
+    private static final int AUTO_ATTACH_SCAN_INTERVAL = 1;
     /** How far from a bogey the nearest track edge is looked up. */
     private static final double TRACK_SEARCH_RADIUS = 8.0;
 
@@ -528,16 +528,10 @@ public final class SableTrainController {
             suspendCarriagePoints(train, data);
             data.hasTarget = false;
             if (isAutoAttachLeader(train, data)) {
-                if (isTrainAtRest(train)) {
-                    // Prefer the track the train is actually lying next to. The saved track
-                    // path is only a refinement for small bumps and must not block the
-                    // nearby-track scan (its failure used to set a retry timer first).
-                    if (!tryAttachToNearbyTrack(serverSubLevel, serverLevel, train, data)) {
-                        tryAttachToSavedTrack(train, serverLevel, data);
-                    }
-                } else if (serverLevel.getGameTime() % 20 == 0) {
-                    LOGGER.info("Sablenautics: detached train {} is still moving, waiting to re-attach",
-                            train.id);
+                // Attach immediately whenever a valid rail layout is found. Do not wait for
+                // the bodies to settle and do not use a slow physics approach.
+                if (!tryAttachToNearbyTrack(serverSubLevel, serverLevel, train, data)) {
+                    tryAttachToSavedTrack(train, serverLevel, data);
                 }
             }
             syncBogieBlocks(serverSubLevel, data);
@@ -1244,7 +1238,7 @@ public final class SableTrainController {
         }
 
         train.graph = graph;
-        if (beginAttachment(train, level, false)) {
+        if (beginAttachment(train, level)) {
             LOGGER.info("Sablenautics: train {} started attaching to its saved track", train.id);
             return true;
         }
@@ -1379,7 +1373,7 @@ public final class SableTrainController {
             // If the body is already close/aligned, attach it immediately. Otherwise start a
             // physics-driven approach; a bogie that is near the rail allows the whole train
             // to be pulled/rotated smoothly onto it.
-            if (beginAttachment(train, level, isCandidateNearBogie(bogieProbes, chosen.worldPos()))) {
+            if (beginAttachment(train, level)) {
                 LOGGER.info("Sablenautics: train {} started attaching at {}", train.id, chosen.worldPos());
                 return true;
             }
@@ -1392,17 +1386,11 @@ public final class SableTrainController {
     }
 
     /**
-     * Starts a smooth re-attachment. Bodies that are already almost exactly on the target
-     * attach immediately; everything else is driven onto the rails by physics (no teleport),
-     * which keeps the train's momentum intact.
-     *
-     * @param allowApproach true when a bogie is close enough to justify pulling a rotated or
-     *                      scattered train onto the rails
-     * @return true when an immediate attach happened or the approach was started
+     * Attaches the train instantly: as soon as a valid rail layout has been found, the
+     * carriage bodies are teleported to the target poses. Waiting for the bodies to settle or
+     * for a physics approach made re-railing feel unresponsive.
      */
-    private static boolean beginAttachment(Train train, ServerLevel level, boolean allowApproach) {
-        double maxError = 0.0;
-        double maxAngle = 0.0;
+    private static boolean beginAttachment(Train train, ServerLevel level) {
         List<Vector3d> targets = new ArrayList<>(train.carriages.size());
         List<Quaterniond> orientations = new ArrayList<>(train.carriages.size());
 
@@ -1424,9 +1412,6 @@ public final class SableTrainController {
             Vector3d target = computeBodyTargetPosition(data.subLevel(), data, dce.positionAnchor, orientation);
             targets.add(target);
             orientations.add(orientation);
-
-            maxError = Math.max(maxError, pose.position().distance(target));
-            maxAngle = Math.max(maxAngle, orientationAngle(pose.orientation(), orientation));
         }
 
         if (targets.size() > 1) {
@@ -1441,22 +1426,7 @@ public final class SableTrainController {
             }
         }
 
-        boolean closeEnough = maxError <= AUTO_ATTACH_DISTANCE && maxAngle <= AUTO_ATTACH_ANGLE;
-        if (!closeEnough && !allowApproach) {
-            LOGGER.debug("Sablenautics: auto-attach rejected for train {} (error {}, angle {})",
-                    train.id, String.format("%.2f", maxError),
-                    String.format("%.1f", Math.toDegrees(maxAngle)));
-            return false;
-        }
-
-        if (closeEnough
-                && maxError <= DIRECT_ATTACH_DISTANCE
-                && maxAngle <= DIRECT_ATTACH_ANGLE) {
-            attachNow(train, level, targets, orientations);
-            return true;
-        }
-
-        startApproach(train, level, targets, orientations);
+        attachNow(train, level, targets, orientations);
         return true;
     }
 
@@ -1522,22 +1492,6 @@ public final class SableTrainController {
             data.hasTarget = false;
             data.nextAttachAttemptTick = nextAttemptTick;
         }
-    }
-
-    /**
-     * @return true when every detached carriage is slow enough to be placed on rails
-     */
-    private static boolean isTrainAtRest(Train train) {
-        boolean found = false;
-        for (SubLevelData data : SUBLEVELS.values()) {
-            if (!data.trainId().equals(train.id) || !data.detached) continue;
-            if (data.subLevel().isRemoved()) continue;
-            found = true;
-            if (data.subLevel().latestLinearVelocity.lengthSquared() > 1.0) {
-                return false;
-            }
-        }
-        return found;
     }
 
     /** Keeps a sub-level awake in Sable's physics pipeline. */
