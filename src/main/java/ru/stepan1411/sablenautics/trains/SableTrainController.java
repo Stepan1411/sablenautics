@@ -157,8 +157,8 @@ public final class SableTrainController {
      * rails" case; without it a scattered/rotated train can never be re-railed by itself.
      */
     private static final double AUTO_ATTACH_FORCE_DISTANCE = 12.0;
-    /** ...and within this angle, so a body lying across the rails can be pulled back too. */
-    private static final double AUTO_ATTACH_FORCE_ANGLE = Math.toRadians(120.0);
+    /** ...and any orientation is accepted: a carriage that fell over is flipped back upright. */
+    private static final double AUTO_ATTACH_FORCE_ANGLE = Math.PI;
     /**
      * A detached body slower than this (blocks/second, relative to its rail frame) may be
      * captured and smoothly pulled back onto nearby rails. Faster bodies are only attached
@@ -1554,27 +1554,36 @@ public final class SableTrainController {
         // Otherwise a train flying past a distant track would be teleported onto it. A body
         // that was detached by hand (or bumped off) is usually a few blocks away, so capture
         // it with the physics approach instead of refusing forever.
-        if (maxError > AUTO_ATTACH_DISTANCE || maxAngle > AUTO_ATTACH_ANGLE) {
-            double speed = maxRelativeBodySpeed(train);
-            boolean canApproach = maxError <= AUTO_ATTACH_FORCE_DISTANCE
-                    && maxAngle <= AUTO_ATTACH_FORCE_ANGLE
-                    && speed <= APPROACH_CAPTURE_SPEED;
-            if (!canApproach) {
-                LOGGER.debug("Sablenautics: train {} is too far from the rail target (error {}, angle {}, speed {})",
-                        train.id, String.format("%.2f", maxError),
-                        String.format("%.1f", Math.toDegrees(maxAngle)),
-                        String.format("%.2f", speed));
-                return false;
-            }
+        double speed = maxRelativeBodySpeed(train);
+        boolean positionClose = maxError <= AUTO_ATTACH_DISTANCE;
+        boolean aligned = maxAngle <= AUTO_ATTACH_ANGLE;
 
-            startApproach(train, level, targets, orientations);
-            LOGGER.info("Sablenautics: train {} is being pulled onto the rails (error {}, angle {})",
-                    train.id, String.format("%.2f", maxError),
-                    String.format("%.1f", Math.toDegrees(maxAngle)));
+        if (positionClose && (aligned || speed <= APPROACH_CAPTURE_SPEED)) {
+            // Sitting on the rail position but possibly rolled over: snap it upright now.
+            // Waiting for the approach timeout here made a flipped carriage look "stuck".
+            attachNow(train, level, targets, orientations, preservedSpeed);
+            if (!aligned) {
+                LOGGER.info("Sablenautics: train {} was flipped back onto the rails (angle {})",
+                        train.id, String.format("%.1f", Math.toDegrees(maxAngle)));
+            }
             return true;
         }
 
-        attachNow(train, level, targets, orientations, preservedSpeed);
+        boolean canApproach = maxError <= AUTO_ATTACH_FORCE_DISTANCE
+                && maxAngle <= AUTO_ATTACH_FORCE_ANGLE
+                && speed <= APPROACH_CAPTURE_SPEED;
+        if (!canApproach) {
+            LOGGER.debug("Sablenautics: train {} is too far from the rail target (error {}, angle {}, speed {})",
+                    train.id, String.format("%.2f", maxError),
+                    String.format("%.1f", Math.toDegrees(maxAngle)),
+                    String.format("%.2f", speed));
+            return false;
+        }
+
+        startApproach(train, level, targets, orientations);
+        LOGGER.info("Sablenautics: train {} is being pulled onto the rails (error {}, angle {})",
+                train.id, String.format("%.2f", maxError),
+                String.format("%.1f", Math.toDegrees(maxAngle)));
         return true;
     }
 
