@@ -1559,46 +1559,18 @@ public final class SableTrainController {
             }
         }
 
-        // Only attach directly when the wheels/body are actually next to the found rails.
-        // Otherwise a train flying past a distant track would be teleported onto it. A body
-        // that was detached by hand (or bumped off) is usually a few blocks away, so capture
-        // it with the physics approach instead of refusing forever.
-        if (instant) {
-            attachNow(train, level, targets, orientations, preservedSpeed);
-            LOGGER.info("Sablenautics: train {} snapped back onto the rails instantly (error {}, angle {})",
+        // Re-attach only when the carriage body is already within two blocks of the rail
+        // target. At that distance it snaps instantly, in any orientation. Farther away it
+        // stays detached until the player moves it closer.
+        if (maxError > AUTO_ATTACH_DISTANCE) {
+            LOGGER.debug("Sablenautics: train {} is {} blocks from the rail target; waiting for it to come within {}",
                     train.id, String.format("%.2f", maxError),
-                    String.format("%.1f", Math.toDegrees(maxAngle)));
-            return true;
-        }
-
-        double speed = maxRelativeBodySpeed(train);
-        boolean positionClose = maxError <= AUTO_ATTACH_DISTANCE;
-        boolean aligned = maxAngle <= AUTO_ATTACH_ANGLE;
-
-        if (positionClose && (aligned || speed <= APPROACH_CAPTURE_SPEED)) {
-            // Sitting on the rail position but possibly rolled over: snap it upright now.
-            // Waiting for the approach timeout here made a flipped carriage look "stuck".
-            attachNow(train, level, targets, orientations, preservedSpeed);
-            if (!aligned) {
-                LOGGER.info("Sablenautics: train {} was flipped back onto the rails (angle {})",
-                        train.id, String.format("%.1f", Math.toDegrees(maxAngle)));
-            }
-            return true;
-        }
-
-        boolean canApproach = maxError <= AUTO_ATTACH_FORCE_DISTANCE
-                && maxAngle <= AUTO_ATTACH_FORCE_ANGLE
-                && speed <= APPROACH_CAPTURE_SPEED;
-        if (!canApproach) {
-            LOGGER.debug("Sablenautics: train {} is too far from the rail target (error {}, angle {}, speed {})",
-                    train.id, String.format("%.2f", maxError),
-                    String.format("%.1f", Math.toDegrees(maxAngle)),
-                    String.format("%.2f", speed));
+                    String.format("%.1f", AUTO_ATTACH_DISTANCE));
             return false;
         }
 
-        startApproach(train, level, targets, orientations);
-        LOGGER.info("Sablenautics: train {} is being pulled onto the rails (error {}, angle {})",
+        attachNow(train, level, targets, orientations, preservedSpeed);
+        LOGGER.info("Sablenautics: train {} snapped onto the rails (error {}, angle {})",
                 train.id, String.format("%.2f", maxError),
                 String.format("%.1f", Math.toDegrees(maxAngle)));
         return true;
