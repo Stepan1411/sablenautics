@@ -347,6 +347,8 @@ public final class SableTrainController {
          * train with it, both in position and in rotation.
          */
         private @Nullable ServerSubLevel railFrame;
+        /** Next tick at which a missing rail frame may be re-detected from the body position. */
+        private long nextFrameProbeTick;
         /**
          * True when the carriage body ends up facing opposite to the graph direction, for
          * example after being attached in the nearest of the two rail directions. Wheel spin
@@ -658,6 +660,16 @@ public final class SableTrainController {
         // world space and add the frame's motion through the finite difference below.
         Vector3d plotTarget = new Vector3d(targetPosition);
         applyRailFrame(data, serverLevel, anchor, targetPosition, targetOrientation);
+
+        // If the target is still inside Sable's plot grid, no rail frame was resolved. Moving
+        // the body there would teleport it to the plot coordinates in the open world, which
+        // looks like the train never attaches. Keep it in place instead.
+        if (!data.detached && isInPlotGrid(serverLevel, targetPosition)) {
+            LOGGER.warn("Sablenautics: carriage {} of train {} has a rail target inside the plot grid ({}); keeping the body in place",
+                    data.carriageIndex(), train.id, targetPosition);
+            syncBogieBlocks(serverSubLevel, data);
+            return;
+        }
         if (!isFinite(targetPosition) || !isFinite(targetOrientation)) {
             LOGGER.warn("Sablenautics: carriage {} of train {} has an invalid rail target ({} / {})",
                     data.carriageIndex(), train.id, targetPosition, targetOrientation);
@@ -2761,6 +2773,25 @@ public final class SableTrainController {
                 data.railFrame = containing;
                 return containing;
             }
+            // The graph anchor is not inside any plot. Usually this means open-world rails, but
+            // it can also happen when the anchor is at the edge of a moving platform. Probe the
+            // body position occasionally and keep the frame if the body is physically on it.
+            long now = level != null ? level.getGameTime() : 0L;
+            if (level != null && now >= data.nextFrameProbeTick) {
+                data.nextFrameProbeTick = now + 10L;
+                Vector3dc bodyPosition = data.subLevel().logicalPose().position();
+                ServerSubLevel detected = findRailFrameForWorldPoint(level,
+                        new Vec3(bodyPosition.x(), bodyPosition.y(), bodyPosition.z()),
+                        data.trainId, data.subLevel());
+                if (detected != null) {
+                    if (previous != detected) {
+                        LOGGER.info("Sablenautics: carriage {} of train {} detected rail frame {} from its body",
+                                data.carriageIndex(), data.trainId, detected.getUniqueId());
+                    }
+                    data.railFrame = detected;
+                    return detected;
+                }
+            }
             if (previous != null) {
                 LOGGER.info("Sablenautics: carriage {} of train {} left rail frame {}",
                         data.carriageIndex(), data.trainId, previous.getUniqueId());
@@ -2803,6 +2834,28 @@ public final class SableTrainController {
         SubLevelContainer container = SubLevelContainer.getContainer(level);
         if (container == null) return null;
 
+        // Only sub-levels whose world body is near the train can carry its rails. Querying the
+        // physics world keeps this cheap even with many platforms in the save.
+        AABB query = new AABB(worldPoint, worldPoint).inflate(6.0);
+        boolean anyNearby = false;
+        for (SubLevel subLevel : Sable.HELPER.getAllIntersecting(level,
+                new dev.ryanhcode.sable.companion.math.BoundingBox3d(query))) {
+            anyNearby = true;
+            if (!(subLevel instanceof ServerSubLevel frame) || frame.isRemoved()) continue;
+            if (frame == ownBody || frameBelongsToTrain(frame, trainId)) continue;
+
+            BoundingBox3ic bounds = frame.getPlot().getBoundingBox();
+            if (bounds == null) continue;
+
+            Vec3 local = frame.logicalPose().transformPositionInverse(worldPoint);
+            if (!plotContains(bounds, local)) continue;
+            if (!hasTrackNearby(level, local, TRACK_SEARCH_RADIUS)) continue;
+            return frame;
+        }
+
+        if (anyNearby) return null;
+
+        // No body nearby: fall back to an exact plot check (mostly for restored saves).
         for (SubLevel subLevel : container.getAllSubLevels()) {
             if (!(subLevel instanceof ServerSubLevel frame) || frame.isRemoved()) continue;
             if (frame == ownBody || frameBelongsToTrain(frame, trainId)) continue;
@@ -2822,6 +2875,11 @@ public final class SableTrainController {
         return point.x >= bounds.minX() - 1.0 && point.x <= bounds.maxX() + 2.0
                 && point.y >= bounds.minY() - 1.0 && point.y <= bounds.maxY() + 2.0
                 && point.z >= bounds.minZ() - 1.0 && point.z <= bounds.maxZ() + 2.0;
+    }
+
+    private static boolean isInPlotGrid(ServerLevel level, Vector3dc point) {
+        SubLevelContainer container = SubLevelContainer.getContainer(level);
+        return container != null && container.inBounds(point);
     }
 
     /**
