@@ -5,7 +5,9 @@ import com.simibubi.create.Create;
 import com.simibubi.create.content.trains.entity.RemoveTrainPacket;
 import com.simibubi.create.content.trains.entity.Train;
 import com.simibubi.create.content.trains.track.ITrackBlock;
+import dev.ryanhcode.sable.Sable;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
+import dev.ryanhcode.sable.sublevel.SubLevel;
 import net.createmod.catnip.platform.CatnipServices;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -82,8 +84,14 @@ public final class SableTrainCommands {
             boolean recovered = false;
             if (body != null) {
                 var pos = body.logicalPose().position();
+                Vec3 point = new Vec3(pos.x(), pos.y(), pos.z());
+                ServerSubLevel frame = SableTrainController.railFrameFor(body);
+                if (frame != null) {
+                    // Rail graph coordinates, not world coordinates.
+                    point = frame.logicalPose().transformPositionInverse(point);
+                }
                 recovered = SableTrainController.relocateToNearestTrack(nearest, level,
-                        new Vec3(pos.x(), pos.y(), pos.z()), direction, 12.0);
+                        point, direction, 12.0);
             }
 
             if (!recovered) {
@@ -110,6 +118,12 @@ public final class SableTrainCommands {
      * @return the Sable train with a carriage closest to {@code origin} in this dimension
      */
     private static @Nullable Train nearestTrain(Vec3 origin, ServerLevel level) {
+        // When the command runs from inside a Sable sub-level, the player's position is in that
+        // sub-level's plot space. Compare carriage bodies in the same space so trains riding on
+        // the platform can be found too.
+        SubLevel playerFrame = Sable.HELPER.getContaining(level,
+                new org.joml.Vector3d(origin.x, origin.y, origin.z));
+
         double bestDistance = Double.MAX_VALUE;
         Train nearest = null;
 
@@ -120,6 +134,14 @@ public final class SableTrainCommands {
 
                 double distance = subLevel.logicalPose().position()
                         .distanceSquared(origin.x, origin.y, origin.z);
+                if (playerFrame != null && playerFrame != subLevel) {
+                    // Inverse-project the body into the plot the player is standing in.
+                    Vec3 plot = playerFrame.logicalPose().transformPositionInverse(
+                            new Vec3(subLevel.logicalPose().position().x(),
+                                    subLevel.logicalPose().position().y(),
+                                    subLevel.logicalPose().position().z()));
+                    distance = plot.distanceToSqr(origin);
+                }
                 if (distance < bestDistance) {
                     bestDistance = distance;
                     nearest = train;
@@ -132,7 +154,16 @@ public final class SableTrainCommands {
 
     private static Vec3 lookDirection(CommandSourceStack source) {
         Entity entity = source.getEntity();
-        return entity != null ? entity.getLookAngle() : Vec3.directionFromRotation(source.getRotation());
+        Vec3 direction = entity != null ? entity.getLookAngle()
+                : Vec3.directionFromRotation(source.getRotation());
+        if (entity != null) {
+            SubLevel frame = Sable.HELPER.getContaining(entity);
+            if (frame != null) {
+                // Track graphs inside a sub-level are stored in its local coordinates.
+                direction = frame.logicalPose().transformNormalInverse(direction);
+            }
+        }
+        return direction;
     }
 
     /**
