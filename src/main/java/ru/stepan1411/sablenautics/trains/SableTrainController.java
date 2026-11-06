@@ -559,9 +559,12 @@ public final class SableTrainController {
                         .sub(data.attachTargetPosition);
 
                 // If the player grabbed the train with a staff and is dragging it away from
-                // the approach target, stop pulling it back to the old rails.
-                if (velocity.lengthSquared() > 0.25
-                        && awayFromTarget.dot(new Vector3d(velocity.x(), velocity.y(), velocity.z())) > 0.0) {
+                // the approach target, stop pulling it back to the old rails. Only a clear,
+                // fast horizontal drag counts: falling or settling must not cancel the
+                // approach (that used to restart it forever).
+                if (isBeingDraggedAway(velocity, awayFromTarget)) {
+                    LOGGER.info("Sablenautics: approach for train {} cancelled because the body is being dragged away",
+                            train.id);
                     cancelApproach(train, now + AUTO_ATTACH_RETRY_TICKS);
                 } else if (data.attachStartTick >= 0
                         && now - data.attachStartTick > APPROACH_TIMEOUT_TICKS) {
@@ -1835,6 +1838,23 @@ public final class SableTrainController {
             }
         }
         return false;
+    }
+
+    /**
+     * @return true only when the body is moving away from its approach target fast enough and
+     *         mostly horizontally to be a deliberate player drag. Gravity, bouncing and the
+     *         approach spring itself must not cancel an in-progress re-attachment.
+     */
+    private static boolean isBeingDraggedAway(Vector3dc velocity, Vector3d awayFromTarget) {
+        double vx = velocity.x();
+        double vz = velocity.z();
+        double ax = awayFromTarget.x();
+        double az = awayFromTarget.z();
+        double horizontalAwaySq = ax * ax + az * az;
+        double horizontalSpeedSq = vx * vx + vz * vz;
+        if (horizontalAwaySq < 4.0 || horizontalSpeedSq < 9.0) return false;
+        double dot = ax * vx + az * vz;
+        return dot > 0.7 * Math.sqrt(horizontalAwaySq * horizontalSpeedSq);
     }
 
     /**
