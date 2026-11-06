@@ -1391,6 +1391,7 @@ public final class SableTrainController {
      * for a physics approach made re-railing feel unresponsive.
      */
     private static boolean beginAttachment(Train train, ServerLevel level) {
+        double preservedSpeed = currentForwardSpeed(train);
         double maxError = 0.0;
         double maxAngle = 0.0;
         List<Vector3d> targets = new ArrayList<>(train.carriages.size());
@@ -1440,12 +1441,12 @@ public final class SableTrainController {
             return false;
         }
 
-        attachNow(train, level, targets, orientations);
+        attachNow(train, level, targets, orientations, preservedSpeed);
         return true;
     }
 
     private static void attachNow(Train train, ServerLevel level, List<Vector3d> targets,
-                                  List<Quaterniond> orientations) {
+                                  List<Quaterniond> orientations, double preservedSpeed) {
         for (int i = 0; i < train.carriages.size(); i++) {
             SubLevelData data = dataFor(train, i);
             if (data == null) continue;
@@ -1463,7 +1464,7 @@ public final class SableTrainController {
             markAttached(data, level, target, orientation);
         }
 
-        finishTrainAttachment(train);
+        finishTrainAttachment(train, preservedSpeed);
     }
 
     private static void startApproach(Train train, ServerLevel level, List<Vector3d> targets,
@@ -1550,19 +1551,76 @@ public final class SableTrainController {
     }
 
     private static void finishTrainAttachment(Train train) {
+        finishTrainAttachment(train, 0.0);
+    }
+
+    private static void finishTrainAttachment(Train train, double preservedSpeed) {
         if (hasDetachedCarriage(train)) return;
 
         train.derailed = false;
         train.targetSpeed = 0;
         train.speedBeforeStall = null;
-        // A train that was re-railed after coming to rest must stay at rest. Restoring the
-        // speed it had when it left the rails launched it off the end again after fly-offs.
-        train.speed = 0;
+
+        double maxSpeed = train.maxSpeed();
+        train.speed = Mth.clamp(preservedSpeed, -maxSpeed, maxSpeed);
+        if (Math.abs(train.speed) > 1.0e-6) {
+            applyForwardVelocity(train, train.speed);
+        }
 
         LAST_TRAIN_SPEED.remove(train.id);
         DETACHED_GRAPHS.remove(train.id);
         DETACHED_TRAIN_SPEED.remove(train.id);
         linkNeighbours(train);
+    }
+
+    /**
+     * @return the current forward speed of the physical bodies in blocks per tick
+     */
+    private static double currentForwardSpeed(Train train) {
+        double sum = 0.0;
+        int count = 0;
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id)) continue;
+            if (data.subLevel().isRemoved()) continue;
+
+            Vec3 forward = railForward(train, data);
+            if (forward.lengthSqr() < 1.0e-8) continue;
+
+            Vector3dc velocity = data.subLevel().latestLinearVelocity;
+            sum += (forward.x * velocity.x()
+                    + forward.y * velocity.y()
+                    + forward.z * velocity.z()) / 20.0;
+            count++;
+        }
+        return count > 0 ? sum / count : 0.0;
+    }
+
+    /**
+     * Applies the preserved forward speed to every attached body after a teleport.
+     */
+    private static void applyForwardVelocity(Train train, double speed) {
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (!data.trainId().equals(train.id) || data.detached) continue;
+            ServerSubLevel body = data.subLevel();
+            ServerLevel level = body.getLevel();
+            if (level == null || body.isRemoved()) continue;
+
+            SubLevelPhysicsSystem physicsSystem = SubLevelPhysicsSystem.get(level);
+            PhysicsPipeline pipeline = physicsSystem != null ? physicsSystem.getPipeline() : null;
+            RigidBodyHandle handle = physicsSystem != null ? physicsSystem.getPhysicsHandle(body) : null;
+            if (pipeline == null || handle == null) continue;
+
+            Vec3 forward = railForward(train, data);
+            if (forward.lengthSqr() < 1.0e-8) continue;
+
+            Vector3d axis = new Vector3d(forward.x, forward.y, forward.z);
+            double desired = speed * 20.0;
+            double current = handle.getLinearVelocity(new Vector3d()).dot(axis);
+            handle.addLinearAndAngularVelocity(
+                    new Vector3d(axis).mul(desired - current),
+                    new Vector3d());
+            pipeline.wakeUp(body);
+        }
     }
 
     private static Vec3 railForward(Train train, SubLevelData data) {
@@ -2640,6 +2698,8 @@ public final class SableTrainController {
         ensureMappings(train);
         linkNeighbours(train);
 
+        double preservedSpeed = currentForwardSpeed(train);
+
         // Guard against a corrupted logical layout: if every carriage anchor ended up in
         // the same spot, teleporting would collapse the whole train into one point.
         if (train.carriages.size() > 1) {
@@ -2731,9 +2791,12 @@ public final class SableTrainController {
 
         if (moved > 0) {
             train.derailed = false;
-            train.speed = 0;
+            train.speed = Mth.clamp(preservedSpeed, -train.maxSpeed(), train.maxSpeed());
             train.targetSpeed = 0;
             train.speedBeforeStall = null;
+            if (Math.abs(train.speed) > 1.0e-6) {
+                applyForwardVelocity(train, train.speed);
+            }
             LAST_TRAIN_SPEED.remove(train.id);
             DETACHED_GRAPHS.remove(train.id);
             DETACHED_TRAIN_SPEED.remove(train.id);
