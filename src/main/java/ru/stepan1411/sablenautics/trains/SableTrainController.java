@@ -257,8 +257,8 @@ public final class SableTrainController {
     private static final Map<UUID, Long> BLOCKED_TRAINS = new HashMap<>();
     /** Trains that may not re-attach until this game tick (set when they detach). */
     private static final Map<UUID, Long> ATTACH_COOLDOWN_UNTIL = new HashMap<>();
-    /** Ticks during which a freshly detached train cannot re-attach. */
-    private static final int ATTACH_COOLDOWN_TICKS = 10;
+    /** Ticks during which a freshly detached train cannot re-attach (manual detach snaps back at once). */
+    private static final int ATTACH_COOLDOWN_TICKS = 1;
     /** Game tick until which a freshly docked train is held still. */
     private static final Map<UUID, Long> DOCKED_UNTIL = new HashMap<>();
     /** Sub-levels whose plot no longer contains any blocks, refreshed periodically. */
@@ -1342,7 +1342,7 @@ public final class SableTrainController {
         }
 
         train.graph = graph;
-        if (beginAttachment(train, level)) {
+        if (beginAttachment(train, level, true)) {
             LOGGER.info("Sablenautics: train {} started attaching to its saved track", train.id);
             return true;
         }
@@ -1476,6 +1476,7 @@ public final class SableTrainController {
         }
 
         int attempts = Math.min(unique.size(), MAX_ATTACH_ATTEMPTS);
+        boolean instant = !hasFlownOff(train);
         for (int i = 0; i < attempts; i++) {
             TrackPoint chosen = unique.get(i);
             if (!tryLayoutAround(train, level, chosen, direction, false)) {
@@ -1484,10 +1485,9 @@ public final class SableTrainController {
                 continue;
             }
 
-            // If the body is already close/aligned, attach it immediately. Otherwise start a
-            // physics-driven approach; a bogie that is near the rail allows the whole train
-            // to be pulled/rotated smoothly onto it.
-            if (beginAttachment(train, level)) {
+            // A manual detach snaps back instantly, even if the body was dragged far away.
+            // A train that flew off the end of the track keeps the cautious approach.
+            if (beginAttachment(train, level, instant)) {
                 LOGGER.info("Sablenautics: train {} started attaching at {}", train.id, chosen.worldPos());
                 return true;
             }
@@ -1505,6 +1505,15 @@ public final class SableTrainController {
      * for a physics approach made re-railing feel unresponsive.
      */
     private static boolean beginAttachment(Train train, ServerLevel level) {
+        return beginAttachment(train, level, false);
+    }
+
+    /**
+     * @param instant when true the bodies are teleported onto the rails immediately, regardless
+     *                of distance or orientation. Used for a train that was detached manually:
+     *                it should snap back at once instead of waiting for a physics approach.
+     */
+    private static boolean beginAttachment(Train train, ServerLevel level, boolean instant) {
         if (isAttachCooldown(train.id, level.getGameTime())) {
             return false;
         }
@@ -1554,6 +1563,14 @@ public final class SableTrainController {
         // Otherwise a train flying past a distant track would be teleported onto it. A body
         // that was detached by hand (or bumped off) is usually a few blocks away, so capture
         // it with the physics approach instead of refusing forever.
+        if (instant) {
+            attachNow(train, level, targets, orientations, preservedSpeed);
+            LOGGER.info("Sablenautics: train {} snapped back onto the rails instantly (error {}, angle {})",
+                    train.id, String.format("%.2f", maxError),
+                    String.format("%.1f", Math.toDegrees(maxAngle)));
+            return true;
+        }
+
         double speed = maxRelativeBodySpeed(train);
         boolean positionClose = maxError <= AUTO_ATTACH_DISTANCE;
         boolean aligned = maxAngle <= AUTO_ATTACH_ANGLE;
@@ -2024,6 +2041,19 @@ public final class SableTrainController {
             if (!other.detached) return false;
         }
         return found;
+    }
+
+    /**
+     * @return true when any carriage left the rails because the track ended. Such a train is
+     *         not snapped back automatically; only a manual detach gets the instant re-attach.
+     */
+    private static boolean hasFlownOff(Train train) {
+        for (SubLevelData data : SUBLEVELS.values()) {
+            if (data.trainId().equals(train.id) && data.flewOff) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** @return true if {@code data} is the single carriage that coordinates a whole-train re-attach */
