@@ -44,7 +44,9 @@ public final class SableTrainCommands {
                         .then(Commands.literal("derailed")
                                 .executes(ctx -> purge(ctx.getSource(), false)))
                         .then(Commands.literal("all")
-                                .executes(ctx -> purge(ctx.getSource(), true)))));
+                                .executes(ctx -> purge(ctx.getSource(), true))))
+                .then(Commands.literal("traininfo")
+                        .executes(ctx -> trainInfo(ctx.getSource()))));
     }
 
     private static int gotorail(CommandSourceStack source) {
@@ -253,8 +255,24 @@ public final class SableTrainCommands {
         return best;
     }
 
-    private static int purge(CommandSourceStack source, boolean all) {
-        MinecraftServer server = source.getServer();
+    private static int trainInfo(CommandSourceStack source) {
+        ServerLevel level = source.getLevel();
+        for (Train train : Create.RAILWAYS.trains.values()) {
+            SableTrainController.ensureMappings(train);
+        }
+        Train nearest = nearestTrain(source.getPosition(), level);
+        if (nearest == null) {
+            source.sendFailure(Component.literal("Sablenautics: no Sable train found"));
+            return 0;
+        }
+
+        for (String line : SableTrainController.describeTrain(nearest, level)) {
+            source.sendSuccess(() -> Component.literal(line), false);
+        }
+        return 1;
+    }
+
+    private static int purge(CommandSourceStack source, boolean all) {        MinecraftServer server = source.getServer();
         List<Train> targets = new ArrayList<>();
         for (Train train : Create.RAILWAYS.trains.values()) {
             if (all || train.derailed) {

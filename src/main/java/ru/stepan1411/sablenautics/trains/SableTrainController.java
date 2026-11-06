@@ -453,17 +453,9 @@ public final class SableTrainController {
                 assemblyDirection, superglue == null ? List.of() : List.copyOf(superglue), safeBogies);
         applyConductors(data, subLevel);
 
-        // A train can be assembled inside another Sable body (a platform or another train
-        // carrying rails). Remember that body: the rails move with it, so the carriage has to
-        // follow its pose and velocity instead of staying in the open world frame.
-        if (contraption != null && subLevel.getLevel() != null) {
-            ServerSubLevel railFrame = containingSubLevel(subLevel.getLevel(),
-                    Vec3.atCenterOf(contraption.anchor));
-            if (railFrame != subLevel && railFrame != null
-                    && !frameBelongsToTrain(railFrame, train.id)) {
-                data.railFrame = railFrame;
-            }
-        }
+        // Do not decide the rail frame from the assembly position: the train may have been
+        // built on a platform whose track graph still lives in world coordinates. The frame is
+        // resolved from the carriage's actual graph anchor on the first tick instead.
 
         SUBLEVELS.put(subLevel.getUniqueId(), data);
         GONE_TRAINS.remove(train.id);
@@ -665,8 +657,9 @@ public final class SableTrainController {
         // the body there would teleport it to the plot coordinates in the open world, which
         // looks like the train never attaches. Keep it in place instead.
         if (!data.detached && isInPlotGrid(serverLevel, targetPosition)) {
-            LOGGER.warn("Sablenautics: carriage {} of train {} has a rail target inside the plot grid ({}); keeping the body in place",
-                    data.carriageIndex(), train.id, targetPosition);
+            LOGGER.warn("Sablenautics: carriage {} of train {} has a rail target inside the plot grid (target {}, anchor {}, frame {}); keeping the body in place",
+                    data.carriageIndex(), train.id, targetPosition, anchor,
+                    data.railFrame != null ? data.railFrame.getUniqueId() : "none");
             syncBogieBlocks(serverSubLevel, data);
             return;
         }
@@ -2003,6 +1996,64 @@ public final class SableTrainController {
     }
 
     /**
+     * Diagnostic dump for {@code /sablenautics traininfo}.
+     */
+    public static List<String> describeTrain(Train train, ServerLevel level) {
+        List<String> lines = new ArrayList<>();
+        lines.add("train " + train.id + " carriages=" + train.carriages.size()
+                + " derailed=" + train.derailed + " graph=" + (train.graph != null)
+                + " speed=" + train.speed);
+
+        for (int i = 0; i < train.carriages.size(); i++) {
+            SubLevelData data = dataFor(train, i);
+            if (data == null) {
+                lines.add("  c" + i + ": no sublevel data");
+                continue;
+            }
+
+            ServerSubLevel body = data.subLevel();
+            if (body.isRemoved()) {
+                lines.add("  c" + i + ": body removed");
+                continue;
+            }
+
+            Carriage carriage = train.carriages.get(i);
+            carriage.updateContraptionAnchors();
+            DimensionalCarriageEntity dce = carriage.getDimensionalIfPresent(level.dimension());
+            Vec3 anchor = dce != null ? dce.positionAnchor : null;
+            ServerSubLevel frame = data.railFrame;
+            Vector3dc bodyPos = body.logicalPose().position();
+
+            String base = "  c" + i + " detached=" + data.detached
+                    + " reversed=" + data.bodyReversed
+                    + " frame=" + (frame != null ? frame.getUniqueId() : "none")
+                    + " body=" + fmt(bodyPos.x()) + "," + fmt(bodyPos.y()) + "," + fmt(bodyPos.z());
+
+            if (anchor == null) {
+                lines.add(base + " anchor=none");
+                continue;
+            }
+
+            Pose3d pose = body.logicalPose();
+            Quaterniond orientation = computeTargetOrientation(dce, pose, data.initialYaw());
+            Vector3d target = computeBodyTargetPosition(body, data, anchor, orientation);
+            Vector3d plotTarget = new Vector3d(target);
+            applyRailFrame(data, level, anchor, target, orientation);
+            double error = pose.position().distance(target);
+
+            lines.add(base + " plotAnchor=" + fmt(anchor.x) + "," + fmt(anchor.y) + "," + fmt(anchor.z)
+                    + " plotTarget=" + fmt(plotTarget.x) + "," + fmt(plotTarget.y) + "," + fmt(plotTarget.z)
+                    + " err=" + fmt(error)
+                    + " hasTarget=" + data.hasTarget);
+        }
+        return lines;
+    }
+
+    private static String fmt(double value) {
+        return String.format(java.util.Locale.ROOT, "%.2f", value);
+    }
+
+    /**
      * Cheap check before walking the track graph: is there any track block (including the fake
      * blocks laid along curves) within {@code radius} of {@code point}?
      */
@@ -2773,11 +2824,11 @@ public final class SableTrainController {
                 data.railFrame = containing;
                 return containing;
             }
-            // The graph anchor is not inside any plot. Usually this means open-world rails, but
-            // it can also happen when the anchor is at the edge of a moving platform. Probe the
-            // body position occasionally and keep the frame if the body is physically on it.
+            // The graph anchor is not inside any plot. For world rails this is normal; only
+            // try to recover a frame when the anchor itself is in Sable's plot grid.
             long now = level != null ? level.getGameTime() : 0L;
-            if (level != null && now >= data.nextFrameProbeTick) {
+            if (level != null && isInPlotGrid(level, new Vector3d(plotAnchor.x, plotAnchor.y, plotAnchor.z))
+                    && now >= data.nextFrameProbeTick) {
                 data.nextFrameProbeTick = now + 10L;
                 Vector3dc bodyPosition = data.subLevel().logicalPose().position();
                 ServerSubLevel detected = findRailFrameForWorldPoint(level,
