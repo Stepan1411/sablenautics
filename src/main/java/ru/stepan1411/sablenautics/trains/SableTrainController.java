@@ -673,9 +673,12 @@ public final class SableTrainController {
 
         // Recovery: an earlier build could strand a freshly assembled body at Sable's plot
         // coordinates while its rail target is a normal world position. Pull it back to the
-        // rails once instead of leaving it unreachable forever.
-        if (!data.detached && isInPlotGrid(serverLevel, pose.position())
-                && !isInPlotGrid(serverLevel, targetPosition)) {
+        // rails once instead of leaving it unreachable forever. A body that is simply very far
+        // from its target is treated the same way.
+        boolean strandedInPlot = isInPlotGrid(serverLevel, pose.position())
+                && !isInPlotGrid(serverLevel, targetPosition);
+        boolean absurdlyFar = pose.position().distance(targetPosition) > 64.0;
+        if (!data.detached && (strandedInPlot || absurdlyFar)) {
             SubLevelPhysicsSystem rescuePhysics = SubLevelPhysicsSystem.get(serverLevel);
             PhysicsPipeline rescuePipeline = rescuePhysics != null ? rescuePhysics.getPipeline() : null;
             if (rescuePipeline != null) {
