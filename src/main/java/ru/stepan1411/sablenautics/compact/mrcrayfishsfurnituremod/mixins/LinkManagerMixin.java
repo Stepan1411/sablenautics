@@ -1,4 +1,4 @@
-package ru.stepan1411.sablenautics.compat.mixins.MrCrayfishsFurnitureMod;
+package ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod.mixins;
 
 import com.mrcrayfish.furniture.refurbished.electricity.LinkManager;
 import net.minecraft.core.BlockPos;
@@ -10,7 +10,7 @@ import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
-import ru.stepan1411.sablenautics.compat.MrCrayfishsFurnitureMod.MrCrayfishsFurnitureModElectricityCompat;
+import ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod.MrCrayfishsFurnitureModElectricityCompat;
 
 @Mixin(LinkManager.class)
 public class LinkManagerMixin {

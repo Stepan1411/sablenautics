@@ -1,4 +1,4 @@
-package ru.stepan1411.sablenautics.compat.MrCrayfishsFurnitureMod;
+package ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.math.Axis;

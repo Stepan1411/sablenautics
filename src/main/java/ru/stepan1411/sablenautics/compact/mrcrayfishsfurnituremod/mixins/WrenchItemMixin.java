@@ -1,4 +1,4 @@
-package ru.stepan1411.sablenautics.compat.mixins.MrCrayfishsFurnitureMod;
+package ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod.mixins;
 
 import com.mrcrayfish.furniture.refurbished.electricity.NodeHitResult;
 import com.mrcrayfish.furniture.refurbished.item.WrenchItem;
@@ -8,7 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
-import ru.stepan1411.sablenautics.compat.MrCrayfishsFurnitureMod.MrCrayfishsFurnitureModElectricityCompat;
+import ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod.MrCrayfishsFurnitureModElectricityCompat;
 
 @Mixin(WrenchItem.class)
 public class WrenchItemMixin {

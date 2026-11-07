@@ -1,4 +1,4 @@
-package ru.stepan1411.sablenautics.compat.mixins.MrCrayfishsFurnitureMod;
+package ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod.mixins;
 
 import com.mrcrayfish.furniture.refurbished.client.renderer.blockentity.ElectricBlockEntityRenderer;
 import com.mrcrayfish.furniture.refurbished.electricity.IElectricityNode;
@@ -6,7 +6,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import ru.stepan1411.sablenautics.compat.MrCrayfishsFurnitureMod.MrCrayfishsFurnitureModElectricityClientCompat;
+import ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod.MrCrayfishsFurnitureModElectricityClientCompat;
 
 @Mixin(ElectricBlockEntityRenderer.class)
 public class ElectricBlockEntityRendererMixin {

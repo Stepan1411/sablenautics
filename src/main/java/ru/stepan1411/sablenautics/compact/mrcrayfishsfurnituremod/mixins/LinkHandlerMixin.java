@@ -1,4 +1,4 @@
-package ru.stepan1411.sablenautics.compat.mixins.MrCrayfishsFurnitureMod;
+package ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod.mixins;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mrcrayfish.furniture.refurbished.client.LinkHandler;
@@ -15,7 +15,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
-import ru.stepan1411.sablenautics.compat.MrCrayfishsFurnitureMod.MrCrayfishsFurnitureModElectricityClientCompat;
+import ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod.MrCrayfishsFurnitureModElectricityClientCompat;
 
 import java.util.Set;
 

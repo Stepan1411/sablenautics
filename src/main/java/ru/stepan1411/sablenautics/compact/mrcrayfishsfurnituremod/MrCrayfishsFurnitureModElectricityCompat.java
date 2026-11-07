@@ -1,4 +1,4 @@
-package ru.stepan1411.sablenautics.compat.MrCrayfishsFurnitureMod;
+package ru.stepan1411.sablenautics.compact.mrcrayfishsfurnituremod;
 
 import com.mrcrayfish.furniture.refurbished.electricity.IElectricityNode;
 import com.mrcrayfish.furniture.refurbished.electricity.NodeHitResult;
