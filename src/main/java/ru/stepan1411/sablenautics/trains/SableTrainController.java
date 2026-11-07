@@ -199,6 +199,8 @@ public final class SableTrainController {
     private static final int AUTO_ATTACH_RETRY_TICKS = 1;
     /** Cheap re-probe interval while the train has not found any nearby track yet. */
     private static final int AUTO_ATTACH_SCAN_INTERVAL = 1;
+    /** Slower retry interval when a detached train has no track within reach at all. */
+    private static final int NO_TRACK_RETRY_TICKS = 10;
     /** How far from a bogey the nearest track edge is looked up. */
     private static final double TRACK_SEARCH_RADIUS = 8.0;
 
@@ -651,7 +653,12 @@ public final class SableTrainController {
         // A Sable train that is still moving keeps its momentum instead and leaves the rails.
         // But if chunks are unloaded, travelling points may appear blocked even though the
         // track is fine — don't derail in that case.
-        if (data.initialized && level.hasChunk(chunkCoord((int) dce.positionAnchor.x), chunkCoord((int) dce.positionAnchor.z))) {
+        // A freshly re-attached train gets a short grace period so residual momentum or a
+        // travelling point that still sits on the buffer cannot launch it off the rails again
+        // on the very next tick.
+        if (data.initialized
+                && serverLevel.getGameTime() >= data.attachGraceUntil
+                && level.hasChunk(chunkCoord((int) dce.positionAnchor.x), chunkCoord((int) dce.positionAnchor.z))) {
             double endOfTrackSpeed = endOfTrackSpeed(serverSubLevel, train, data, carriage);
             if (endOfTrackSpeed > 0) {
                 flyOffEndOfTrack(train, data.carriageIndex(), dce.positionAnchor, endOfTrackSpeed);
@@ -1517,7 +1524,10 @@ public final class SableTrainController {
         }
 
         if (candidates.isEmpty()) {
-            if (level.getGameTime() % 20 == 0) {
+            // Do not walk every track graph every tick for a body that is lying far away from
+            // any rail; retry at a slower pace instead.
+            data.nextAttachAttemptTick = now + NO_TRACK_RETRY_TICKS;
+            if (level.getGameTime() % 100 == 0) {
                 LOGGER.info("Sablenautics: no track candidates for train {} near {}",
                         train.id, body.logicalPose().position());
             }
@@ -1579,7 +1589,11 @@ public final class SableTrainController {
         if (isAttachCooldown(train.id, level.getGameTime())) {
             return false;
         }
-        double preservedSpeed = currentForwardSpeed(train);
+        // Inertia is preserved when a train is merely put back on its rails, but never after
+        // an end-of-track fly-off: the body is still moving fast when it gets re-attached, and
+        // restoring that speed launched the train off the same buffer again on the next tick.
+        // That produced an endless attach/detach loop at the end of the track.
+        double preservedSpeed = hasFlownOff(train) ? 0.0 : currentForwardSpeed(train);
         double maxError = 0.0;
         double maxAngle = 0.0;
         double minUpDot = 1.0;
