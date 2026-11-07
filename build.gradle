@@ -102,6 +102,10 @@ dependencies {
     runtimeOnly("dev.engine-room.flywheel:flywheel-neoforge-${minecraft_version}:${flywheel_version}")
     implementation("com.tterrag.registrate:Registrate:${registrate_version}")
 
+    // Optional MrCrayfish's Furniture Mod (Refurbished) electricity compatibility.
+    // The mod is only present at runtime; the jar is used for compilation.
+    compileOnly files("libs/refurbished_furniture-neoforge-1.21.1-1.0.22.jar")
+
     // MixinExtras
     compileOnly "io.github.llamalad7:mixinextras-common:0.5.3"
     annotationProcessor "io.github.llamalad7:mixinextras-common:0.5.3"

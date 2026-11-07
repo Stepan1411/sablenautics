@@ -38,10 +38,8 @@ description = '''${mod_description}'''
 [[mixins]]
 config="sablenautics.mixins.json"
 
-# Optional compat (soft dependencies, required:false): Simulated's Physics Assembler
-# must not disassemble sticker-built Sable bodies; pumpjack bearings of Diesel
-# Generators / TFMG refuse sticker builds with an assembly error.
-# Ignored if those mods are absent.
+# Optional electricity compatibility (wrench, links and rendering on Sable sub-levels).
+# Ignored when MrCrayfish's Furniture Mod (Refurbished) is absent.
 [[mixins]]
 config="sablenautics.compat.mixins.json"
 
@@ -64,6 +62,14 @@ side = "BOTH"
 modId = "create"
 type = "required"
 versionRange = "[6.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+# Optional electricity compatibility (wrench, links and rendering on Sable sub-levels).
+[[dependencies."${mod_id}"]]
+modId = "refurbished_furniture"
+type = "optional"
+versionRange = "[1.0,)"
 ordering = "AFTER"
 side = "BOTH"
 

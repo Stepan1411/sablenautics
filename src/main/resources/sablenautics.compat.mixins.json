@@ -1,7 +1,14 @@
 {
   "required": false,
   "package": "ru.stepan1411.sablenautics.compat.mixins",
+  "plugin": "ru.stepan1411.sablenautics.compat.MrCrayfishsFurnitureMod.MrCrayfishsFurnitureModMixinPlugin",
   "compatibilityLevel": "JAVA_21",
-  "mixins": [],
-  "client": []
+  "mixins": [
+    "MrCrayfishsFurnitureMod.WrenchItemMixin",
+    "MrCrayfishsFurnitureMod.LinkManagerMixin"
+  ],
+  "client": [
+    "MrCrayfishsFurnitureMod.ElectricBlockEntityRendererMixin",
+    "MrCrayfishsFurnitureMod.LinkHandlerMixin"
+  ]
 }
